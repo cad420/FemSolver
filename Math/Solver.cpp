@@ -3,7 +3,7 @@
 
 extern void CG(const SymetrixSparseMatrix& A,Vector& x,const Vector& b,double tolerance,int limit,int& iter,double& norm);
 extern void PCG_ICC(const SymetrixSparseMatrix& A,Vector& x,const Vector& b,double tolerance,int limit,int& iter,double& norm);
-extern void PCG_SSOR(const SymetrixSparseMatrix& A,Vector& x,const Vector& b,double tolerance,int limit,int& iter,double& norm);
+// extern void PCG_SSOR(const SymetrixSparseMatrix& A,Vector& x,const Vector& b,double tolerance,int limit,int& iter,double& norm);
 extern void BiCGSTAB(const SymetrixSparseMatrix& A,Vector& x,const Vector& b,double tolerance,int limit,int& iter,double& norm);
 
 Solver::Solver()
@@ -17,11 +17,11 @@ Solver::~Solver()
 
 void Solver::Solve(const SymetrixSparseMatrix& A,Vector& x,const Vector& b)
 {
-    // CG(A,x,b,tolerance,iteration_set,iteration_close,ResdualNorm);
+    CG(A,x,b,tolerance,iteration_set,iteration_close,ResdualNorm);
     // PCG_SSOR(A,x,b,tolerance,iteration_set,iteration_close,ResdualNorm);
-    PCG_ICC(A,x,b,tolerance,iteration_set,iteration_close,ResdualNorm);
+    // PCG_ICC(A,x,b,tolerance,iteration_set,iteration_close,ResdualNorm);
     
-    // BiCGSTAB(A,x,b,tolerance,iteration_set,iteration_close,ResdualNorm);
+   // BiCGSTAB(A,x,b,tolerance,iteration_set,iteration_close,ResdualNorm);
 }
 
 void Solver::setMaxIteration(idxType iter)

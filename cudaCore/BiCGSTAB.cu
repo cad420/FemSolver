@@ -536,3 +536,539 @@ void BiCGSTAB(const SymetrixSparseMatrix& A,Vector& x,const Vector& b,double tol
 	}
 	x.setvalues({xx.begin(),xx.end()});
 }
+
+
+
+// inline void processCUDAError(cusparseStatus_t err, const char *file, int line) {
+//     if (err == CUSPARSE_STATUS_SUCCESS)
+//         return;
+//     std::cerr << "CUDA error: " << cusparseGetErrorString(err) << " happened at line: " << line
+//               << " in file: " << file << std::endl;
+// }
+// #define CUSPARSECheck(f) processCUDAError(f, __FILE__, __LINE__)
+
+// void BiCGSTAB(const SymetrixSparseMatrix& A,Vector& x,const Vector& b,double tolerance,int limit,int& iter,double& norm)
+// {
+// 	printf("BiCGSTAB...\n");
+// 	int num_rows = A.m_Mat.size(), num_not_zero = 0;
+// 	int m = num_rows;
+// 	int num_offsets = m + 1;
+	
+// 	// CSR Format in Thrust
+// 	thrust::device_vector<idxType> A_rows;
+// 	A_rows.resize(num_offsets);
+// 	thrust::device_vector<idxType> A_columns;
+// 	thrust::device_vector<Scalar> A_values, M_values;
+// 	// from ellpack to csr
+// 	for (int i = 0; i < A.m_Mat.size(); i++) {
+// 		for (int j = 0; j < A.m_Mat[i].size(); j++) {
+// 			if (A.m_Mat[i][j].second != 0) {
+// 				A_columns.push_back(A.m_Mat[i][j].first);
+// 				A_values.push_back(A.m_Mat[i][j].second);
+// 				num_not_zero++;
+// 			}
+// 		}
+// 		A_rows[i + 1] = num_not_zero;
+// 	}
+// 	M_values.resize(A_values.size());
+// 	thrust::copy(A_values.begin(), A_values.end(), M_values.begin());
+
+// 	CudaVector B(b.size()), R(b.size()), R0(b.size()), X(b.size()), V(b.size()), P(b.size()), P_aux(b.size()), S(b.size()), S_aux(b.size()), T(b.size()), temp(b.size());
+// 	// std::vector<Scalar> b_vec = b.generateScalar();
+// 	// thrust::copy(b_vec.begin(), b_vec.end(), B.values.begin());
+// 	// thrust::copy(b_vec.begin(), b_vec.end(), R0.values.begin());
+
+// 	cublasHandle_t cublasHandle = NULL;
+// 	cusparseHandle_t cusparseHandle = NULL;
+// 	cublasCreate(&cublasHandle);
+// 	cusparseCreate(&cusparseHandle);
+	
+// 	cusparseCreateDnVec(&B.vec, m, thrust::raw_pointer_cast(&B.values[0]), CUDA_R_64F);
+// 	cusparseCreateDnVec(&R.vec, m, thrust::raw_pointer_cast(&R.values[0]), CUDA_R_64F);
+// 	cusparseCreateDnVec(&X.vec, m, thrust::raw_pointer_cast(&X.values[0]), CUDA_R_64F);
+// 	cusparseCreateDnVec(&R0.vec, m, thrust::raw_pointer_cast(&R0.values[0]), CUDA_R_64F);
+// 	cusparseCreateDnVec(&V.vec, m, thrust::raw_pointer_cast(&V.values[0]), CUDA_R_64F);
+// 	cusparseCreateDnVec(&P.vec, m, thrust::raw_pointer_cast(&P.values[0]), CUDA_R_64F);
+// 	cusparseCreateDnVec(&P_aux.vec, m, thrust::raw_pointer_cast(&P_aux.values[0]), CUDA_R_64F);
+// 	cusparseCreateDnVec(&S.vec, m, thrust::raw_pointer_cast(&S.values[0]), CUDA_R_64F);
+// 	cusparseCreateDnVec(&S_aux.vec, m, thrust::raw_pointer_cast(&S_aux.values[0]), CUDA_R_64F);
+// 	cusparseCreateDnVec(&T.vec, m, thrust::raw_pointer_cast(&T.values[0]), CUDA_R_64F);
+// 	cusparseCreateDnVec(&temp.vec, m, thrust::raw_pointer_cast(&temp.values[0]), CUDA_R_64F);
+
+// 	std::vector<Scalar> b_vec = b.generateScalar();
+// 	thrust::copy(b_vec.begin(), b_vec.end(), B.values.begin());
+
+// 	cusparseIndexBase_t  baseIdx = CUSPARSE_INDEX_BASE_ZERO;
+//     // IMPORTANT: Upper/Lower triangular decompositions of A
+//     //            (matM_lower, matM_upper) must use two distinct descriptors
+//     cusparseSpMatDescr_t matA, matM_lower, matM_upper;
+//     cusparseMatDescr_t   matLU;
+//     thrust::device_vector<Scalar> M_rows=A_rows, M_columns=A_columns;
+//     cusparseFillMode_t   fill_lower    = CUSPARSE_FILL_MODE_LOWER;
+//     cusparseDiagType_t   diag_unit     = CUSPARSE_DIAG_TYPE_UNIT;
+//     cusparseFillMode_t   fill_upper    = CUSPARSE_FILL_MODE_UPPER;
+//     cusparseDiagType_t   diag_non_unit = CUSPARSE_DIAG_TYPE_NON_UNIT;
+
+// 	// A
+// 	cusparseCreateCsr(&matA, m, m, num_not_zero, thrust::raw_pointer_cast(&A_rows[0]), thrust::raw_pointer_cast(&A_columns[0]), thrust::raw_pointer_cast(&A_values[0]), CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I, baseIdx, CUDA_R_64F);
+// 	// M_lower
+// 	cusparseCreateCsr(&matM_lower, m, m, num_not_zero, thrust::raw_pointer_cast(&M_rows[0]), thrust::raw_pointer_cast(&M_columns[0]), thrust::raw_pointer_cast(&M_values[0]), CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I, baseIdx, CUDA_R_64F);
+// 	cusparseSpMatSetAttribute(matM_lower, CUSPARSE_SPMAT_FILL_MODE, &fill_lower, sizeof(fill_lower));
+// 	cusparseSpMatSetAttribute(matM_lower, CUSPARSE_SPMAT_DIAG_TYPE, &diag_unit, sizeof(diag_unit));
+// 	// M_upper
+// 	cusparseCreateCsr(&matM_upper, m, m, num_not_zero, thrust::raw_pointer_cast(&M_rows[0]), thrust::raw_pointer_cast(&M_columns[0]), thrust::raw_pointer_cast(&M_values[0]), CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I, baseIdx, CUDA_R_64F);
+// 	cusparseSpMatSetAttribute(matM_upper, CUSPARSE_SPMAT_FILL_MODE, &fill_upper, sizeof(fill_upper));
+// 	cusparseSpMatSetAttribute(matM_upper, CUSPARSE_SPMAT_DIAG_TYPE, &diag_non_unit, sizeof(diag_non_unit));
+	
+// 	//-------------------------------------------------------------------------
+// 	// ### Preparation ### b = A * X
+// 	const double Alpha = 0.75;
+// 	size_t bufferSizeMV;
+// 	double beta = 0.0;
+// 	cusparseSpMV_bufferSize(cusparseHandle, CUSPARSE_OPERATION_NON_TRANSPOSE, &Alpha, matA, X.vec, &beta, B.vec, CUDA_R_64F, CUSPARSE_SPMV_ALG_DEFAULT, &bufferSizeMV);
+// 	thrust::device_vector<Scalar> bufferMV(bufferSizeMV);
+// 	cusparseSpMV(cusparseHandle, CUSPARSE_OPERATION_NON_TRANSPOSE, &Alpha, matA, X.vec, &beta, B.vec, CUDA_R_64F, CUSPARSE_SPMV_ALG_DEFAULT, thrust::raw_pointer_cast(&bufferMV[0]));
+// 	// X0 = 0
+// 	// Perform Incomplete-LU factorization of A (csrilu0) -> M_lower, M_upper
+// 	csrilu02Info_t infoM = NULL;
+//     int bufferSizeLU = 0;
+    
+// 	cusparseCreateMatDescr(&matLU);
+//     cusparseSetMatType(matLU, CUSPARSE_MATRIX_TYPE_GENERAL);
+//     cusparseSetMatIndexBase(matLU, baseIdx);
+//     cusparseCreateCsrilu02Info(&infoM);
+
+// 	cusparseDcsrilu02_bufferSize(cusparseHandle, m, num_not_zero, matLU, thrust::raw_pointer_cast(&M_values[0]), thrust::raw_pointer_cast(&A_rows[0]), thrust::raw_pointer_cast(&A_columns[0]), infoM, &bufferSizeLU);
+// 	thrust::device_vector<Scalar> bufferLU(bufferSizeLU);
+// 	cusparseDcsrilu02_analysis(cusparseHandle, m, num_not_zero, matLU, thrust::raw_pointer_cast(&M_values[0]), thrust::raw_pointer_cast(&A_rows[0]), thrust::raw_pointer_cast(&A_columns[0]), infoM, CUSPARSE_SOLVE_POLICY_USE_LEVEL, thrust::raw_pointer_cast(&bufferLU[0]));
+
+// 	int structural_zero;
+// 	cusparseXcsrilu02_zeroPivot(cusparseHandle, infoM, &structural_zero);
+
+// 	// M = L * U
+// 	cusparseDcsrilu02(cusparseHandle, m, num_not_zero, matLU, thrust::raw_pointer_cast(&M_values[0]), thrust::raw_pointer_cast(&A_rows[0]), thrust::raw_pointer_cast(&A_columns[0]), infoM, CUSPARSE_SOLVE_POLICY_USE_LEVEL, thrust::raw_pointer_cast(&bufferLU[0]));
+
+// 	// find numerical zero;
+// 	int numerical_zero;
+// 	cusparseXcsrilu02_zeroPivot(cusparseHandle, infoM, &numerical_zero);
+// 	cusparseDestroyMatDescr(matLU);
+
+// 	//-----------------------------------------------------------------------
+// 	// ### BiCGSTAB ###
+// 	printf("BiCGSTAB loop:\n");
+// 	// gpu_BiCGSTAB(cublasHandle, cusparseHandle, m, matA, matM_lower, matM_upper, B, X, R0, R, P, P_aux, S, S_aux, V, T, temp, bufferMV, limit, tolerance, iter, norm);
+
+// 	const double zero      = 0.0;
+//     const double one       = 1.0;
+//     const double minus_one = -1.0;
+//     //--------------------------------------------------------------------------
+//     // Create opaque data structures that holds analysis data between calls
+//     double              coeff_tmp;
+//     size_t              bufferSizeL, bufferSizeU;
+//     // void*               bufferL, *bufferU;
+//     cusparseSpSVDescr_t spsvDescrL, spsvDescrU;
+//     cusparseSpSV_createDescr(&spsvDescrL);
+//     cusparseSpSV_bufferSize(cusparseHandle, CUSPARSE_OPERATION_NON_TRANSPOSE, &coeff_tmp, matM_lower, P.vec, temp.vec, CUDA_R_64F, CUSPARSE_SPSV_ALG_DEFAULT, spsvDescrL, &bufferSizeL);
+// 	thrust::device_vector<Scalar> bufferL(bufferSizeL);
+// 	thrust::device_vector<Scalar> bufferU(bufferSizeL);
+// 	thrust::copy(B.values.begin(), B.values.end(), R0.values.begin());
+// 	cusparseSpSV_analysis(cusparseHandle, CUSPARSE_OPERATION_NON_TRANSPOSE, &coeff_tmp, matM_lower, P.vec, temp.vec, CUDA_R_64F, CUSPARSE_SPSV_ALG_DEFAULT, spsvDescrL, thrust::raw_pointer_cast(&bufferL[0]));
+
+// 	// Calculate UPPER buffersize
+// 	cusparseSpSV_createDescr(&spsvDescrU);
+// 	cusparseSpSV_bufferSize(cusparseHandle, CUSPARSE_OPERATION_NON_TRANSPOSE, &coeff_tmp, matM_upper, temp.vec, P_aux.vec, CUDA_R_64F, CUSPARSE_SPSV_ALG_DEFAULT, spsvDescrU, &bufferSizeU);
+	
+// 	// auto error = cudaGetLastError();
+// 	cusparseSpSV_analysis(cusparseHandle, CUSPARSE_OPERATION_NON_TRANSPOSE, &coeff_tmp, matM_upper, temp.vec, P_aux.vec, CUDA_R_64F, CUSPARSE_SPSV_ALG_DEFAULT, spsvDescrU, thrust::raw_pointer_cast(&bufferU[0]));
+// 	//--------------------------------------------------------------------------
+// 	// ### 1 ### R0 = b - A * X0 (using initial guess in X)
+// 	//    (a) copy b in R0
+// 	//    (b) compute R = -A * X0 + R
+// 	cusparseSpMV(cusparseHandle, CUSPARSE_OPERATION_NON_TRANSPOSE, &minus_one, matA, X.vec, &one, R0.vec, CUDA_R_64F, CUSPARSE_SPMV_ALG_DEFAULT, thrust::raw_pointer_cast(&bufferMV[0]));
+
+// 	//--------------------------------------------------------------------------
+// 	double alpha, delta, delta_prev, omega;
+// 	cublasDdot(cublasHandle, m, thrust::raw_pointer_cast(&R0.values[0]), 1, thrust::raw_pointer_cast(&R0.values[0]), 1, &delta);
+// 	delta_prev = delta;
+// 	// R = R0
+// 	thrust::copy(R0.values.begin(), R0.values.end(), R.values.begin());
+// 	//--------------------------------------------------------------------------
+// 	// nrm_R0 = ||R||
+// 	double nrm_R;
+// 	cublasDnrm2(cublasHandle, m, thrust::raw_pointer_cast(&R0.values[0]), 1, &nrm_R);
+// 	double threshold = tolerance * nrm_R;
+// 	printf("  Initial Residual: Norm %e' threshold %e\n", nrm_R, threshold);
+// 	//--------------------------------------------------------------------------
+// 	// ### 2 ### repeat until convergence based on max iterations and
+// 	//           and relative residual
+// 	for (int i = 1; i <= limit; i++) {
+// 		// printf("  Iteration = %d; Error Norm = %e\n", i, nrm_R);
+// 		//----------------------------------------------------------------------
+// 		// ### 4, 7 ### P_i = R_i
+// 		thrust::copy(R.values.begin(), R.values.end(), P.values.begin());
+// 		if (i > 1) {
+// 			//------------------------------------------------------------------
+// 			// ### 6 ### beta = (delta_i / delta_i-1) * (alpha / omega_i-1)
+// 			//    (a) delta_i = (R'_0, R_i-1)
+// 			cublasDdot(cublasHandle, m, thrust::raw_pointer_cast(&R0.values[0]), 1, thrust::raw_pointer_cast(&R.values[0]), 1, &delta);
+// 			//    (b) beta = (delta_i / delta_i-1) * (alpha / omega_i-1);
+// 			double beta = (delta / delta_prev) * (alpha / omega);
+// 			delta_prev  = delta;
+// 			//------------------------------------------------------------------
+// 			// ### 7 ### P = R + beta * (P - omega * V)
+// 			//    (a) P = - omega * V + P
+// 			double minus_omega = -omega;
+// 			cublasDaxpy(cublasHandle, m, &minus_omega, thrust::raw_pointer_cast(&V.values[0]), 1, thrust::raw_pointer_cast(&P.values[0]), 1);
+// 			//    (b) P = beta * P
+// 			cublasDscal(cublasHandle, m, &beta, thrust::raw_pointer_cast(&P.values[0]), 1);
+// 			//    (c) P = R + P
+// 			cublasDaxpy(cublasHandle, m, &one, thrust::raw_pointer_cast(&R.values[0]), 1, thrust::raw_pointer_cast(&P.values[0]), 1);
+// 		}
+// 		//----------------------------------------------------------------------
+// 		// ### 9 ### P_aux = M_U^-1 M_L^-1 P_i
+// 		//    (a) M_L^-1 P_i => tmp    (triangular solver)
+// 		// thrust::fill(temp.values.begin(), temp.values.end(), 0);
+// 		// thrust::fill(P_aux.values.begin(), P_aux.values.end(), 0);
+// 		cusparseSpSV_solve(cusparseHandle, CUSPARSE_OPERATION_NON_TRANSPOSE, &one, matM_lower, P.vec, temp.vec, CUDA_R_64F, CUSPARSE_SPSV_ALG_DEFAULT, spsvDescrL);
+// 		//    (b) M_U^-1 tmp => P_aux    (triangular solver)
+// 		cusparseSpSV_solve(cusparseHandle, CUSPARSE_OPERATION_NON_TRANSPOSE, &one, matM_upper, temp.vec, P_aux.vec, CUDA_R_64F, CUSPARSE_SPSV_ALG_DEFAULT, spsvDescrU);
+// 		//----------------------------------------------------------------------
+// 		// ### 10 ### alpha = (R'0, R_i-1) / (R'0, A * P_aux)
+// 		//    (a) V = A * P_aux
+// 		cusparseSpMV(cusparseHandle, CUSPARSE_OPERATION_NON_TRANSPOSE, &one, matA, P_aux.vec, &zero, V.vec, CUDA_R_64F, CUSPARSE_SPMV_ALG_DEFAULT, thrust::raw_pointer_cast(&bufferMV[0]));
+// 		//    (b) denominator = R'0 * V
+// 		double denominator;
+// 		cublasDdot(cublasHandle, m, thrust::raw_pointer_cast(&R0.values[0]), 1, thrust::raw_pointer_cast(&V.values[0]), 1, &denominator);
+// 		alpha = delta / denominator;
+// 		// PRINT_INFO(delta)
+// 		// PRINT_INFO(alpha)
+// 		//----------------------------------------------------------------------
+// 		// ### 11 ###  X_i = X_i-1 + alpha * P_aux
+// 		cublasDaxpy(cublasHandle, m, &alpha, thrust::raw_pointer_cast(&P_aux.values[0]), 1, thrust::raw_pointer_cast(&X.values[0]), 1);
+// 		//----------------------------------------------------------------------
+// 		// ### 12 ###  S = R_i-1 - alpha * (A * P_aux)
+// 		//    (a) S = R_i-1
+// 		thrust::copy(R.values.begin(), R.values.end(), S.values.begin());
+// 		//    (b) S = -alpha * V + R_i-1
+// 		double minus_alpha = -alpha;
+// 		cublasDaxpy(cublasHandle, m, &minus_alpha, thrust::raw_pointer_cast(&V.values[0]), 1, thrust::raw_pointer_cast(&S.values[0]), 1);
+// 		//----------------------------------------------------------------------
+// 		// ### 13 ###  check ||S|| < threshold
+// 		double nrm_S;
+// 		cublasDnrm2(cublasHandle, m, thrust::raw_pointer_cast(&S.values[0]), 1, &nrm_S);
+// 		// PRINT_INFO(nrm_S)
+// 		iter++;
+// 		if (nrm_S < tolerance) {
+// 			break;
+// 		}
+// 		//----------------------------------------------------------------------
+// 		// ### 14 ### S_aux = M_U^-1 M_L^-1 S
+// 		//    (a) M_L^-1 S => tmp    (triangular solver)
+// 		// cudaMemset(tmp.ptr, 0x0, m * sizeof(double));
+// 		// cudaMemset(S_aux.ptr, 0x0, m * sizeof(double));
+// 		cusparseSpSV_solve(cusparseHandle, CUSPARSE_OPERATION_NON_TRANSPOSE, &one, matM_lower, S.vec, temp.vec, CUDA_R_64F, CUSPARSE_SPSV_ALG_DEFAULT, spsvDescrL);
+// 		//    (b) M_U^-1 tmp => S_aux    (triangular solver)
+// 		cusparseSpSV_solve(cusparseHandle, CUSPARSE_OPERATION_NON_TRANSPOSE, &one, matM_upper, temp.vec, S_aux.vec, CUDA_R_64F, CUSPARSE_SPSV_ALG_DEFAULT, spsvDescrU);
+// 		//----------------------------------------------------------------------
+// 		// ### 15 ### omega = (A * S_aux, s) / (A * S_aux, A * S_aux)
+// 		//    (a) T = A * S_aux
+// 		cusparseSpMV(cusparseHandle, CUSPARSE_OPERATION_NON_TRANSPOSE, &one, matA, S_aux.vec, &zero, T.vec, CUDA_R_64F, CUSPARSE_SPMV_ALG_DEFAULT, thrust::raw_pointer_cast(&bufferMV[0]));
+// 		//    (b) omega_num = (A * S_aux, s)
+// 		double omega_num, omega_den;
+// 		cublasDdot(cublasHandle, m, thrust::raw_pointer_cast(&T.values[0]), 1, thrust::raw_pointer_cast(&S.values[0]), 1, &omega_num);
+// 		//    (c) omega_den = (A * S_aux, A * S_aux)
+// 		cublasDdot(cublasHandle, m, thrust::raw_pointer_cast(&T.values[0]), 1, thrust::raw_pointer_cast(&T.values[0]), 1, &omega_den);
+// 		//    (d) omega = omega_num / omega_den
+// 		omega = omega_num / omega_den;
+// 		// PRINT_INFO(omega)
+// 		// ---------------------------------------------------------------------
+// 		// ### 16 ### omega = X_i = X_i-1 + alpha * P_aux + omega * S_aux
+// 		//    (a) X_i has been updated with h = X_i-1 + alpha * P_aux
+// 		//        X_i = omega * S_aux + X_i
+// 		cublasDaxpy(cublasHandle, m, &omega, thrust::raw_pointer_cast(&S_aux.values[0]), 1, thrust::raw_pointer_cast(&X.values[0]), 1);
+// 		// ---------------------------------------------------------------------
+// 		// ### 17 ###  R_i+1 = S - omega * (A * S_aux)
+// 		//    (a) copy S in R
+// 		thrust::copy(S.values.begin(), S.values.end(), R.values.begin());
+// 		//    (a) R_i+1 = -omega * T + R
+// 		double minus_omega = -omega;
+// 		cublasDaxpy(cublasHandle, m, &minus_omega, thrust::raw_pointer_cast(&T.values[0]), 1, thrust::raw_pointer_cast(&R.values[0]), 1);
+// 		// ---------------------------------------------------------------------
+// 		// ### 18 ###  check ||R_i|| < threshold
+// 		cublasDnrm2(cublasHandle, m, thrust::raw_pointer_cast(&R.values[0]), 1, &nrm_R);
+// 		// PRINT_INFO(nrm_R)
+// 		if (nrm_R < tolerance) {
+// 			break;
+// 		}
+// 	}
+// 	//--------------------------------------------------------------------------
+// 	printf("Check Solution\n"); // ||R = b - A * X||
+// 	//    (a) copy b in R
+// 	thrust::copy(B.values.begin(), B.values.end(), R.values.begin());
+// 	// R = -A * X + R
+// 	cusparseSpMV(cusparseHandle, CUSPARSE_OPERATION_NON_TRANSPOSE, &minus_one, matA, X.vec, &one, R.vec, CUDA_R_64F, CUSPARSE_SPMV_ALG_DEFAULT, thrust::raw_pointer_cast(&bufferMV[0]));
+// 	// check ||R||
+// 	cublasDnrm2(cublasHandle, m, thrust::raw_pointer_cast(&R.values[0]), 1, &nrm_R);
+// 	norm = nrm_R;
+// 	printf("Final iterations = %d\nFinal error norm = %e\n", iter, nrm_R);
+// 	//--------------------------------------------------------------------------
+// 	 cusparseSpSV_destroyDescr(spsvDescrL);
+// 	 cusparseSpSV_destroyDescr(spsvDescrU);
+	
+	
+// 	x.setvalues({X.values.begin(),X.values.end()});
+
+// 	cusparseDestroyDnVec(B.vec);
+//     cusparseDestroyDnVec(X.vec);
+//     cusparseDestroyDnVec(R.vec);
+//     cusparseDestroyDnVec(R0.vec);
+//     cusparseDestroyDnVec(P.vec);
+//     cusparseDestroyDnVec(P_aux.vec);
+//     cusparseDestroyDnVec(S.vec);
+//     cusparseDestroyDnVec(S_aux.vec);
+//     cusparseDestroyDnVec(V.vec);
+//     cusparseDestroyDnVec(T.vec);
+//     cusparseDestroyDnVec(temp.vec);
+//     cusparseDestroySpMat(matA);
+//     cusparseDestroySpMat(matM_lower);
+//     cusparseDestroySpMat(matM_upper);
+//     cusparseDestroy(cusparseHandle);
+//     cublasDestroy(cublasHandle);
+
+// 	return ;
+
+// }
+
+// void PCG_ICC(const SymetrixSparseMatrix& A,Vector& x,const Vector& b,double tolerance,int limit,int& iter,double& norm)
+// {	
+// 	printf("PCG_ICC...\n");
+// 	int num_rows = A.m_Mat.size(), num_not_zero = 0;
+// 	int m = num_rows;
+// 	int num_offsets = m + 1;
+	
+// 	// CSR Format in Thrust
+// 	thrust::device_vector<idxType> A_rows;
+// 	A_rows.resize(num_offsets);
+// 	thrust::device_vector<idxType> A_columns;
+// 	thrust::device_vector<Scalar> A_values, L_values;
+// 	// from ellpack to csr
+// 	for (int i = 0; i < A.m_Mat.size(); i++) {
+// 		for (int j = 0; j < A.m_Mat[i].size(); j++) {
+// 			if (A.m_Mat[i][j].second != 0) {
+// 				A_columns.push_back(A.m_Mat[i][j].first);
+// 				A_values.push_back(A.m_Mat[i][j].second);
+// 				num_not_zero++;
+// 			}
+// 		}
+// 		A_rows[i + 1] = num_not_zero;
+// 	}
+// 	L_values.resize(A_values.size());
+// 	thrust::copy(A_values.begin(), A_values.end(), L_values.begin());
+
+// 	CudaVector B(b.size()), R(b.size()), R_aux(b.size()), X(b.size()), P(b.size()), T(b.size()), tmp(b.size());
+	
+// 	//--------------------------------------------------------------------------
+//     // ### cuSPARSE Handle and descriptors initialization ###
+//     // create the test matrix on the host
+//     cublasHandle_t   cublasHandle   = NULL;
+//     cusparseHandle_t cusparseHandle = NULL;
+//     cublasCreate(&cublasHandle);
+//     cusparseCreate(&cusparseHandle);
+//     // Create dense vectors
+// 	cusparseCreateDnVec(&B.vec, m, thrust::raw_pointer_cast(&B.values[0]), CUDA_R_64F);
+// 	cusparseCreateDnVec(&X.vec, m, thrust::raw_pointer_cast(&X.values[0]), CUDA_R_64F);
+// 	cusparseCreateDnVec(&R.vec, m, thrust::raw_pointer_cast(&R.values[0]), CUDA_R_64F);
+// 	cusparseCreateDnVec(&R_aux.vec, m, thrust::raw_pointer_cast(&R_aux.values[0]), CUDA_R_64F);
+// 	cusparseCreateDnVec(&P.vec, m, thrust::raw_pointer_cast(&P.values[0]), CUDA_R_64F);
+// 	cusparseCreateDnVec(&T.vec, m, thrust::raw_pointer_cast(&T.values[0]), CUDA_R_64F);
+// 	cusparseCreateDnVec(&tmp.vec, m, thrust::raw_pointer_cast(&tmp.values[0]), CUDA_R_64F);
+
+// 	std::vector<Scalar> b_vec = b.generateScalar();
+// 	thrust::copy(b_vec.begin(), b_vec.end(), B.values.begin());
+
+//     cusparseIndexBase_t  baseIdx = CUSPARSE_INDEX_BASE_ZERO;
+//     cusparseSpMatDescr_t matA, matL;
+//     thrust::device_vector<Scalar> L_rows = A_rows, L_columns = A_columns;
+//     cusparseFillMode_t   fill_lower    = CUSPARSE_FILL_MODE_LOWER;
+//     cusparseDiagType_t   diag_non_unit = CUSPARSE_DIAG_TYPE_NON_UNIT;
+//     // A
+//     cusparseCreateCsr(&matA, m, m, num_not_zero, thrust::raw_pointer_cast(&A_rows[0]), thrust::raw_pointer_cast(&A_columns[0]), thrust::raw_pointer_cast(&A_values[0]), CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I, baseIdx, CUDA_R_64F);
+//     // L
+//     cusparseCreateCsr(&matL, m, m, num_not_zero, thrust::raw_pointer_cast(&L_rows[0]), thrust::raw_pointer_cast(&L_columns[0]), thrust::raw_pointer_cast(&L_values[0]), CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I, baseIdx, CUDA_R_64F);
+//     cusparseSpMatSetAttribute(matL, CUSPARSE_SPMAT_FILL_MODE, &fill_lower, sizeof(fill_lower));
+//     cusparseSpMatSetAttribute(matL, CUSPARSE_SPMAT_DIAG_TYPE, &diag_non_unit, sizeof(diag_non_unit));
+//     //--------------------------------------------------------------------------
+//     // ### Preparation ### b = A * X
+//     const double alpha = 0.75;
+//     size_t       bufferSizeMV;
+//     double       beta = 0.0;
+//     cusparseSpMV_bufferSize(cusparseHandle, CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha, matA, X.vec, &beta, B.vec, CUDA_R_64F, CUSPARSE_SPMV_ALG_DEFAULT, &bufferSizeMV);
+//     thrust::device_vector<Scalar> bufferMV(bufferSizeMV);
+//     cusparseSpMV(cusparseHandle, CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha, matA, X.vec, &beta, B.vec, CUDA_R_64F, CUSPARSE_SPMV_ALG_DEFAULT, thrust::raw_pointer_cast(&bufferMV[0]));
+//     // X0 = 0
+// 	thrust::fill(X.values.begin(), X.values.end(), 0.0);
+//     //--------------------------------------------------------------------------
+//     // Perform Incomplete-Cholesky factorization of A (csric0) -> L, L^T
+//     cusparseMatDescr_t descrM;
+//     csric02Info_t      infoM        = NULL;
+//     int                bufferSizeIC = 0;
+//     cusparseCreateMatDescr(&descrM);
+//     cusparseSetMatIndexBase(descrM, baseIdx);
+//     cusparseSetMatType(descrM, CUSPARSE_MATRIX_TYPE_GENERAL);
+//     cusparseSetMatFillMode(descrM, CUSPARSE_FILL_MODE_LOWER);
+//     cusparseSetMatDiagType(descrM, CUSPARSE_DIAG_TYPE_NON_UNIT);
+//     cusparseCreateCsric02Info(&infoM);
+
+//     cusparseDcsric02_bufferSize(cusparseHandle, m, num_not_zero, descrM, thrust::raw_pointer_cast(&L_values[0]), thrust::raw_pointer_cast(&A_rows[0]), thrust::raw_pointer_cast(&A_columns[0]), infoM, &bufferSizeIC);
+ 
+//     thrust::device_vector<Scalar> bufferIC(bufferSizeIC);
+// 	cusparseDcsric02_analysis(cusparseHandle, m, num_not_zero, descrM, thrust::raw_pointer_cast(&L_values[0]), thrust::raw_pointer_cast(&A_rows[0]), thrust::raw_pointer_cast(&A_columns[0]), infoM, CUSPARSE_SOLVE_POLICY_NO_LEVEL, thrust::raw_pointer_cast(&bufferIC[0]));
+//     int structural_zero;
+//     cusparseXcsric02_zeroPivot(cusparseHandle, infoM, &structural_zero);
+//     // M = L * L^T
+//     cusparseDcsric02(cusparseHandle, m, num_not_zero, descrM, thrust::raw_pointer_cast(&L_values[0]), thrust::raw_pointer_cast(&A_rows[0]), thrust::raw_pointer_cast(&A_columns[0]), infoM, CUSPARSE_SOLVE_POLICY_NO_LEVEL, thrust::raw_pointer_cast(&bufferIC[0]));
+//     // Find numerical zero
+//     int numerical_zero;
+//     cusparseXcsric02_zeroPivot(cusparseHandle, infoM, &numerical_zero);
+
+//     cusparseDestroyCsric02Info(infoM);
+//     cusparseDestroyMatDescr(descrM);
+//     //--------------------------------------------------------------------------
+//     // ### Run CG computation ###
+//     printf("PCG loop:\n");
+//     // gpu_CG(cublasHandle, cusparseHandle, m,
+//     //        matA, matL, B, X, R, R_aux, P, T,
+//     //        tmp, bufferMV, maxIterations, tolerance);
+
+// 	const double zero      = 0.0;
+//     const double one       = 1.0;
+//     const double minus_one = -1.0;
+//     //--------------------------------------------------------------------------
+//     // ### 1 ### R0 = b - A * X0 (using initial guess in X)
+//     //    (a) copy b in R0
+//     thrust::copy(B.values.begin(), B.values.end(), R.values.begin());
+
+//     //    (b) compute R = -A * X0 + R
+//     cusparseSpMV(cusparseHandle, CUSPARSE_OPERATION_NON_TRANSPOSE, &minus_one, matA, X.vec, &one, R.vec, CUDA_R_64F, CUSPARSE_SPMV_ALG_DEFAULT, thrust::raw_pointer_cast(&bufferMV[0]));
+//     //--------------------------------------------------------------------------
+//     // ### 2 ### R_i_aux = L^-1 L^-T R_i
+//     size_t              bufferSizeL, bufferSizeLT;
+//     cusparseSpSVDescr_t spsvDescrL, spsvDescrLT;
+//     //    (a) L^-T tmp => R_i_aux    (triangular solver)
+//     cusparseSpSV_createDescr(&spsvDescrLT);
+//     cusparseSpSV_bufferSize(cusparseHandle, CUSPARSE_OPERATION_TRANSPOSE, &one, matL, R.vec, tmp.vec, CUDA_R_64F, CUSPARSE_SPSV_ALG_DEFAULT, spsvDescrLT, &bufferSizeLT);
+//     thrust::device_vector<Scalar> bufferLT(bufferSizeLT);
+//     thrust::fill(tmp.values.begin(), tmp.values.end(), 0.0);
+//     CUSPARSECheck( cusparseSpSV_analysis(cusparseHandle, CUSPARSE_OPERATION_TRANSPOSE, &one, matL, R.vec, tmp.vec, CUDA_R_64F, CUSPARSE_SPSV_ALG_DEFAULT, spsvDescrLT, thrust::raw_pointer_cast(&bufferLT[0])) );
+// 	cusparseSpSV_solve(cusparseHandle, CUSPARSE_OPERATION_TRANSPOSE, &one, matL, R.vec, tmp.vec, CUDA_R_64F, CUSPARSE_SPSV_ALG_DEFAULT, spsvDescrLT);
+
+//     //    (b) L^-T R_i => tmp    (triangular solver)
+//     cusparseSpSV_createDescr(&spsvDescrL);
+//     cusparseSpSV_bufferSize(cusparseHandle, CUSPARSE_OPERATION_NON_TRANSPOSE, &one, matL, tmp.vec, R_aux.vec, CUDA_R_64F, CUSPARSE_SPSV_ALG_DEFAULT, spsvDescrL, &bufferSizeL);
+//     thrust::device_vector<Scalar> bufferL(bufferSizeL);
+//     cusparseSpSV_analysis(cusparseHandle, CUSPARSE_OPERATION_NON_TRANSPOSE, &one, matL, tmp.vec, R_aux.vec, CUDA_R_64F, CUSPARSE_SPSV_ALG_DEFAULT, spsvDescrL, thrust::raw_pointer_cast(&bufferL[0]));
+//     thrust::fill(R_aux.values.begin(), R_aux.values.end(), 0.0);
+//     cusparseSpSV_solve(cusparseHandle, CUSPARSE_OPERATION_NON_TRANSPOSE, &one, matL, tmp.vec, R_aux.vec, CUDA_R_64F, CUSPARSE_SPSV_ALG_DEFAULT, spsvDescrL);
+//     //--------------------------------------------------------------------------
+//     // ### 3 ### P0 = R0_aux
+// 	thrust::copy(R_aux.values.begin(), R_aux.values.end(), P.values.begin());
+//     //--------------------------------------------------------------------------
+//     // nrm_R0 = ||R||
+//     double nrm_R;
+//     cublasDnrm2(cublasHandle, m, thrust::raw_pointer_cast(&R.values[0]), 1, &nrm_R);
+//     double threshold = tolerance * nrm_R;
+//     printf("  Initial Residual: Norm %e' threshold %e\n", nrm_R, threshold);
+//     //--------------------------------------------------------------------------
+//     double delta;
+//     cublasDdot(cublasHandle, m, thrust::raw_pointer_cast(&R.values[0]), 1, thrust::raw_pointer_cast(&R.values[0]), 1, &delta);
+//     //--------------------------------------------------------------------------
+//     // ### 4 ### repeat until convergence based on max iterations and
+//     //           and relative residual
+//     for (int i = 1; i <= limit; i++) {
+//         // printf("  Iteration = %d; Error Norm = %e\n", i, nrm_R);
+//         //----------------------------------------------------------------------
+//         // ### 5 ### alpha = (R_i, R_aux_i) / (A * P_i, P_i)
+//         //     (a) T  = A * P_i
+//         cusparseSpMV(cusparseHandle, CUSPARSE_OPERATION_NON_TRANSPOSE, &one, matA, P.vec, &zero, T.vec, CUDA_R_64F, CUSPARSE_SPMV_ALG_DEFAULT, thrust::raw_pointer_cast(&bufferMV[0]));
+//         //     (b) denominator = (T, P_i)
+//         double denominator;
+//         cublasDdot(cublasHandle, m, thrust::raw_pointer_cast(&T.values[0]), 1, thrust::raw_pointer_cast(&P.values[0]), 1, &denominator);
+//         //     (c) alpha = delta / denominator
+//         double alpha = delta / denominator;
+//         // PRINT_INFO(delta)
+//         // PRINT_INFO(denominator)
+//         // PRINT_INFO(alpha)
+//         //----------------------------------------------------------------------
+//         // ### 6 ###  X_i+1 = X_i + alpha * P
+//         //    (a) X_i+1 = -alpha * T + X_i
+//         cublasDaxpy(cublasHandle, m, &alpha, thrust::raw_pointer_cast(&P.values[0]), 1, thrust::raw_pointer_cast(&X.values[0]), 1);
+//         //----------------------------------------------------------------------
+//         // ### 7 ###  R_i+1 = R_i - alpha * (A * P)
+//         //    (a) R_i+1 = -alpha * T + R_i
+//         double minus_alpha = -alpha;
+//         cublasDaxpy(cublasHandle, m, &minus_alpha, thrust::raw_pointer_cast(&T.values[0]), 1, thrust::raw_pointer_cast(&R.values[0]), 1);
+//         //----------------------------------------------------------------------
+//         // ### 8 ###  check ||R_i+1|| < threshold
+//         cublasDnrm2(cublasHandle, m, thrust::raw_pointer_cast(&R.values[0]), 1, &nrm_R);
+//         // PRINT_INFO(nrm_R)
+// 		iter++;
+//         if (nrm_R < threshold)
+// 			break;
+//         //----------------------------------------------------------------------
+//         // ### 9 ### R_aux_i+1 = L^-1 L^-T R_i+1
+//         //    (a) L^-T R_i+1 => tmp    (triangular solver)
+// 		thrust::fill(tmp.values.begin(), tmp.values.end(), 0);
+// 		thrust::fill(R_aux.values.begin(), R_aux.values.end(), 0);
+//         cusparseSpSV_solve(cusparseHandle, CUSPARSE_OPERATION_NON_TRANSPOSE, &one, matL, R.vec, tmp.vec, CUDA_R_64F, CUSPARSE_SPSV_ALG_DEFAULT, spsvDescrL);
+//         //    (b) L^-T tmp => R_aux_i+1    (triangular solver)
+//         cusparseSpSV_solve(cusparseHandle, CUSPARSE_OPERATION_TRANSPOSE, &one, matL, tmp.vec, R_aux.vec, CUDA_R_64F, CUSPARSE_SPSV_ALG_DEFAULT, spsvDescrLT);
+//         //----------------------------------------------------------------------
+//         // ### 10 ### beta = (R_i+1, R_aux_i+1) / (R_i, R_aux_i)
+//         //    (a) delta_new => (R_i+1, R_aux_i+1)
+//         double delta_new;
+//         cublasDdot(cublasHandle, m, thrust::raw_pointer_cast(&R.values[0]), 1, thrust::raw_pointer_cast(&R_aux.values[0]), 1, &delta_new);
+//         //    (b) beta => delta_new / delta
+//         double beta = delta_new / delta;
+//         // PRINT_INFO(delta_new)
+//         // PRINT_INFO(beta)
+//         delta       = delta_new;
+//         //----------------------------------------------------------------------
+//         // ### 11 ###  P_i+1 = R_aux_i+1 + beta * P_i
+//         //    (a) copy R_aux_i+1 in P_i
+// 		thrust::copy(R_aux.values.begin(), R_aux.values.end(), P.values.begin());
+//         //    (b) P_i+1 = beta * P_i + R_aux_i+1
+//         cublasDaxpy(cublasHandle, m, &beta, thrust::raw_pointer_cast(&P.values[0]), 1, thrust::raw_pointer_cast(&P.values[0]), 1);
+//     }
+//     //--------------------------------------------------------------------------
+//     printf("Check Solution\n"); // ||R = b - A * X||
+//     //    (a) copy b in R
+// 	thrust::copy(B.values.begin(), B.values.end(), R.values.begin());
+//     // R = -A * X + R
+//     cusparseSpMV(cusparseHandle, CUSPARSE_OPERATION_NON_TRANSPOSE, &minus_one, matA, X.vec, &one, R.vec, CUDA_R_64F, CUSPARSE_SPMV_ALG_DEFAULT, thrust::raw_pointer_cast(&bufferMV[0]));
+//     // check ||R||
+//     cublasDnrm2(cublasHandle, m, thrust::raw_pointer_cast(&R.values[0]), 1, &nrm_R);
+// 	norm = nrm_R;
+
+//     printf("Final iter: %d error norm = %e\n", iter, nrm_R);
+//     //--------------------------------------------------------------------------
+//     cusparseSpSV_destroyDescr(spsvDescrL);
+//     cusparseSpSV_destroyDescr(spsvDescrLT);
+
+// 	x.setvalues({X.values.begin(), X.values.end()});
+
+//     //--------------------------------------------------------------------------
+//     // ### Free resources ###
+//     cusparseDestroyDnVec(B.vec);
+//     cusparseDestroyDnVec(X.vec);
+//     cusparseDestroyDnVec(R.vec);
+//     cusparseDestroyDnVec(R_aux.vec);
+//     cusparseDestroyDnVec(P.vec);
+//     cusparseDestroyDnVec(T.vec);
+//     cusparseDestroyDnVec(tmp.vec);
+//     cusparseDestroySpMat(matA);
+//     cusparseDestroySpMat(matL);
+//     cusparseDestroy(cusparseHandle);
+//     cublasDestroy(cublasHandle);
+
+// 	return ;
+// }

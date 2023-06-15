@@ -76,3 +76,57 @@ void CG(const SymetrixSparseMatrix& A,Vector& x,const Vector& b,double tolerance
 void PCG(const SymetrixSparseMatrix& A,Vector& x,const Vector& b,double tolerance,int limit,int& iter,double& norm);
 
 void BiCGSTAB(const SymetrixSparseMatrix& A,Vector& x,const Vector& b,double tolerance,int limit,int& iter,double& norm);
+
+
+// #pragma once
+// #include "cuda_runtime.h"
+// #include "device_launch_parameters.h"
+// // #include "helper_math.h"
+// #include <cublas_v2.h>
+// #include <cusparse.h>
+
+// #include<thrust/host_vector.h>
+// #include<thrust/device_vector.h>
+// #include<thrust/copy.h>
+// #include<thrust/sort.h>
+// #include<thrust/execution_policy.h>
+
+// #include "../Math/Solver.hpp"
+
+
+// class CudaVector
+// {
+// public:
+//     cusparseDnVecDescr_t vec;
+//     thrust::device_vector<Scalar> values;
+
+//     CudaVector() {}
+//     CudaVector(int size) { values.resize(size); }
+//     CudaVector(const thrust::device_vector<Scalar>& Vec) 
+//     {
+//         thrust::copy(Vec.begin(), Vec.end(), values.begin());
+//     }
+//     CudaVector(const Vector& Vec) {AllocateData(Vec);}
+//     ~CudaVector() {}
+
+// protected:
+//     void CudaVector::AllocateData(const Vector& Vec)
+//     {
+// 	    auto v = Vec.generateScalar();
+// 	    thrust::copy(v.begin(), v.end(), values.begin());
+//     }
+//     CudaVector& operator=(const CudaVector& Vec) 
+//     {
+//         thrust::copy(Vec.values.begin(), Vec.values.end(), values.begin());
+//     }
+// };
+
+// void CG(const SymetrixSparseMatrix& A,Vector& x,const Vector& b,double tolerance,int limit,int& iter,double& norm);
+
+// void PCG(const SymetrixSparseMatrix& A,Vector& x,const Vector& b,double tolerance,int limit,int& iter,double& norm);
+
+// void PCG_ICC(const SymetrixSparseMatrix& A,Vector& x,const Vector& b,double tolerance,int limit,int& iter,double& norm);
+
+// void BiCGSTAB(const SymetrixSparseMatrix& A,Vector& x,const Vector& b,double tolerance,int limit,int& iter,double& norm);
+
+

@@ -68,11 +68,11 @@ public:
 
 class SymetrixSparseMatrix : public Matrix
 {
-private:
+public:
     std::vector<std::vector<std::pair<idxType,Scalar>>> m_Mat;
     idxType preA;
     idxType count;
-public:
+
     SymetrixSparseMatrix();
     SymetrixSparseMatrix(idxType row,idxType col);
     virtual~SymetrixSparseMatrix();
