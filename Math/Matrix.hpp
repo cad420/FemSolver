@@ -68,11 +68,12 @@ public:
 
 class SymetrixSparseMatrix : public Matrix
 {
-public:
+private:
     std::vector<std::vector<std::pair<idxType,Scalar>>> m_Mat;
     idxType preA;
     idxType count;
 
+public:
     SymetrixSparseMatrix();
     SymetrixSparseMatrix(idxType row,idxType col);
     virtual~SymetrixSparseMatrix();
@@ -97,6 +98,8 @@ public:
 
     void SolveTriL(Vector& x,const Vector& b);
     void SolveTriU(Vector& x,const Vector& b);
+
+    inline const auto& getMat()const {return m_Mat;}
 
     inline const auto& getRow(idxType row)const {
         assert(row < m_row && row >= 0);

@@ -3,15 +3,16 @@
 void CG(const SymetrixSparseMatrix& A,Vector& x,const Vector& b,double tolerance,int limit,int& iter,double& norm)
 {
     printf("CG...\n");
-	int num_rows = A.m_Mat.size(), nnz = 0;
+    auto m_Mat = A.getMat();
+	int num_rows = m_Mat.size(), nnz = 0;
 	int m = num_rows;
 	int num_offsets = m + 1;
 
     int*    h_A_rows    = (int*)    malloc(num_offsets * sizeof(int));
     h_A_rows[0] = 0;
-	for (int i = 0; i < A.m_Mat.size(); i++) {
-		for (int j = 0; j < A.m_Mat[i].size(); j++) {
-			if (A.m_Mat[i][j].second != 0) {
+	for (int i = 0; i < m_Mat.size(); i++) {
+		for (int j = 0; j < m_Mat[i].size(); j++) {
+			if (m_Mat[i][j].second != 0) {
 				nnz++;
 			}
 		}
@@ -23,11 +24,11 @@ void CG(const SymetrixSparseMatrix& A,Vector& x,const Vector& b,double tolerance
     double* h_X         = (double*) malloc(m * sizeof(double));
 	// from ellpack to csr
     int cnt = 0;
-    for (int i = 0; i < A.m_Mat.size(); i++) {
-		for (int j = 0; j < A.m_Mat[i].size(); j++) {
-			if (A.m_Mat[i][j].second != 0) {
-				h_A_columns[cnt] = A.m_Mat[i][j].first;
-                h_A_values[cnt] = A.m_Mat[i][j].second;
+    for (int i = 0; i < m_Mat.size(); i++) {
+		for (int j = 0; j < m_Mat[i].size(); j++) {
+			if (m_Mat[i][j].second != 0) {
+				h_A_columns[cnt] = m_Mat[i][j].first;
+                h_A_values[cnt] = m_Mat[i][j].second;
                 cnt++;
 			}
 		}
@@ -135,6 +136,11 @@ void CG(const SymetrixSparseMatrix& A,Vector& x,const Vector& b,double tolerance
     //--------------------------------------------------------------------------
     // ### 3 ### repeat until convergence based on max iterations and
     //           and relative residual
+    // write iterative info into file
+    FILE* fp = fopen("cg_info.txt", "w");
+    fprintf(fp, "Initial Residual: Norm %e' threshold %e\n", nrm_R, threshold);
+    fprintf(fp, "Iteration\tResidual\n");
+    fprintf(fp, "%d\t%e\n", 0, nrm_R);
     for (int i = 0; ; i++) {
         // printf("  Iteration = %d; Error Norm = %e\n", i, nrm_R);
         //----------------------------------------------------------------------
@@ -168,7 +174,7 @@ void CG(const SymetrixSparseMatrix& A,Vector& x,const Vector& b,double tolerance
         //----------------------------------------------------------------------
         // ### 8 ###  check ||R_i+1|| < threshold
         CUBLASCheck( cublasDnrm2(cublasHandle, m, d_R.ptr, 1, &nrm_R) );
-        // PRINT_INFO(nrm_R)
+        fprintf(fp, "%d\t%e\n", i + 1, nrm_R);
         iter++;
         if (nrm_R < threshold)
             break;
@@ -180,8 +186,6 @@ void CG(const SymetrixSparseMatrix& A,Vector& x,const Vector& b,double tolerance
                                  &delta_new) );
         //    (b) beta => delta_new / delta
         double beta = delta_new / delta;
-        // PRINT_INFO(delta_new)
-        // PRINT_INFO(beta)
         delta       = delta_new;
         //----------------------------------------------------------------------
         // ### 9 ###  P_i+1 = R_i+1 + beta * P_i
@@ -249,15 +253,16 @@ void CG(const SymetrixSparseMatrix& A,Vector& x,const Vector& b,double tolerance
 void PCG_ICC(const SymetrixSparseMatrix& A,Vector& x,const Vector& b,double tolerance,int limit,int& iter,double& norm)
 {
     printf("PCG_ICC...\n");
-	int num_rows = A.m_Mat.size(), nnz = 0;
+    auto m_Mat = A.getMat();
+	int num_rows = m_Mat.size(), nnz = 0;
 	int m = num_rows;
 	int num_offsets = m + 1;
 
     int*    h_A_rows    = (int*)    malloc(num_offsets * sizeof(int));
     h_A_rows[0] = 0;
-	for (int i = 0; i < A.m_Mat.size(); i++) {
-		for (int j = 0; j < A.m_Mat[i].size(); j++) {
-			if (A.m_Mat[i][j].second != 0) {
+	for (int i = 0; i < m_Mat.size(); i++) {
+		for (int j = 0; j < m_Mat[i].size(); j++) {
+			if (m_Mat[i][j].second != 0) {
 				nnz++;
 			}
 		}
@@ -269,11 +274,11 @@ void PCG_ICC(const SymetrixSparseMatrix& A,Vector& x,const Vector& b,double tole
     double* h_X         = (double*) malloc(m * sizeof(double));
 	// from ellpack to csr
     int cnt = 0;
-    for (int i = 0; i < A.m_Mat.size(); i++) {
-		for (int j = 0; j < A.m_Mat[i].size(); j++) {
-			if (A.m_Mat[i][j].second != 0) {
-				h_A_columns[cnt] = A.m_Mat[i][j].first;
-                h_A_values[cnt] = A.m_Mat[i][j].second;
+    for (int i = 0; i < m_Mat.size(); i++) {
+		for (int j = 0; j < m_Mat[i].size(); j++) {
+			if (m_Mat[i][j].second != 0) {
+				h_A_columns[cnt] = m_Mat[i][j].first;
+                h_A_values[cnt] = m_Mat[i][j].second;
                 cnt++;
 			}
 		}
@@ -636,15 +641,16 @@ void PCG_ICC(const SymetrixSparseMatrix& A,Vector& x,const Vector& b,double tole
 void BiCGSTAB(const SymetrixSparseMatrix& A,Vector& x,const Vector& b,double tolerance,int limit,int& iter,double& norm)
 {
     printf("BiCGSTAB...\n");
-	int num_rows = A.m_Mat.size(), nnz = 0;
+    auto m_Mat = A.getMat();
+	int num_rows = m_Mat.size(), nnz = 0;
 	int m = num_rows;
 	int num_offsets = m + 1;
 
     int*    h_A_rows    = (int*)    malloc(num_offsets * sizeof(int));
     h_A_rows[0] = 0;
-	for (int i = 0; i < A.m_Mat.size(); i++) {
-		for (int j = 0; j < A.m_Mat[i].size(); j++) {
-			if (A.m_Mat[i][j].second != 0) {
+	for (int i = 0; i < m_Mat.size(); i++) {
+		for (int j = 0; j < m_Mat[i].size(); j++) {
+			if (m_Mat[i][j].second != 0) {
 				nnz++;
 			}
 		}
@@ -656,11 +662,11 @@ void BiCGSTAB(const SymetrixSparseMatrix& A,Vector& x,const Vector& b,double tol
     double* h_X         = (double*) malloc(m * sizeof(double));
 	// from ellpack to csr
     int cnt = 0;
-    for (int i = 0; i < A.m_Mat.size(); i++) {
-		for (int j = 0; j < A.m_Mat[i].size(); j++) {
-			if (A.m_Mat[i][j].second != 0) {
-				h_A_columns[cnt] = A.m_Mat[i][j].first;
-                h_A_values[cnt] = A.m_Mat[i][j].second;
+    for (int i = 0; i < m_Mat.size(); i++) {
+		for (int j = 0; j < m_Mat[i].size(); j++) {
+			if (m_Mat[i][j].second != 0) {
+				h_A_columns[cnt] = m_Mat[i][j].first;
+                h_A_values[cnt] = m_Mat[i][j].second;
                 cnt++;
             }
 		}
