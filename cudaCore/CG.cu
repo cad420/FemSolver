@@ -137,11 +137,12 @@ void CG(const SymetrixSparseMatrix& A,Vector& x,const Vector& b,double tolerance
     // ### 3 ### repeat until convergence based on max iterations and
     //           and relative residual
     // write iterative info into file
-    FILE* fp = fopen("cg_info.txt", "w");
+    FILE* fp = fopen("temp/cg_info.txt", "w");
     fprintf(fp, "Initial Residual: Norm %e' threshold %e\n", nrm_R, threshold);
     fprintf(fp, "Iteration\tResidual\n");
     fprintf(fp, "%d\t%e\n", 0, nrm_R);
-    for (int i = 0; ; i++) {
+    // for (int i = 0; i < limit; i++) {
+    while (iter < limit && nrm_R > threshold) {
         // printf("  Iteration = %d; Error Norm = %e\n", i, nrm_R);
         //----------------------------------------------------------------------
         // ### 4 ### alpha = (R_i, R_i) / (A * P_i, P_i)
@@ -174,7 +175,7 @@ void CG(const SymetrixSparseMatrix& A,Vector& x,const Vector& b,double tolerance
         //----------------------------------------------------------------------
         // ### 8 ###  check ||R_i+1|| < threshold
         CUBLASCheck( cublasDnrm2(cublasHandle, m, d_R.ptr, 1, &nrm_R) );
-        fprintf(fp, "%d\t%e\n", i + 1, nrm_R);
+        fprintf(fp, "%d\t%e\n", iter + 1, nrm_R);
         iter++;
         if (nrm_R < threshold)
             break;
