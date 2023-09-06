@@ -12,7 +12,7 @@ void CG(const SymetrixSparseMatrix& A,Vector& x,const Vector& b,double tolerance
     h_A_rows[0] = 0;
 	for (int i = 0; i < m_Mat.size(); i++) {
 		for (int j = 0; j < m_Mat[i].size(); j++) {
-			if (m_Mat[i][j].second != 0) {
+			if (m_Mat[i][j].second != 0.f) {
 				nnz++;
 			}
 		}
@@ -26,20 +26,29 @@ void CG(const SymetrixSparseMatrix& A,Vector& x,const Vector& b,double tolerance
     int cnt = 0;
     for (int i = 0; i < m_Mat.size(); i++) {
 		for (int j = 0; j < m_Mat[i].size(); j++) {
-			if (m_Mat[i][j].second != 0) {
+			if (m_Mat[i][j].second != 0.f) {
 				h_A_columns[cnt] = m_Mat[i][j].first;
                 h_A_values[cnt] = m_Mat[i][j].second;
                 cnt++;
 			}
 		}
 	}
-	
+	// write A to file
+    FILE* fpA = fopen("temp/A.txt", "w");
+    for (int i = 0; i < num_offsets; i++) {
+        fprintf(fpA, "%d ", h_A_rows[i]);
+    }
+    fprintf(fpA, "\n");
+    for (int i = 0; i < nnz; i++) {
+        fprintf(fpA, "%d %10.10f\n", h_A_columns[i], h_A_values[i]);
+    }
     for (int i = 0; i < num_rows; i++)
         h_X[i] = 1.0;
     //--------------------------------------------------------------------------
     // ### Device memory management ###
     int*    d_A_rows, *d_A_columns;
     double* d_A_values;
+    double* h_P = (double*) malloc(m * sizeof(double));
     Vec     d_B, d_X, d_R, d_P, d_T;
 
     // allocate device memory for CSR matrices
@@ -141,6 +150,16 @@ void CG(const SymetrixSparseMatrix& A,Vector& x,const Vector& b,double tolerance
     fprintf(fp, "Initial Residual: Norm %e' threshold %e\n", nrm_R, threshold);
     fprintf(fp, "Iteration\tResidual\n");
     fprintf(fp, "%d\t%e\n", 0, nrm_R);
+
+    FILE* fpP = fopen("temp/cg_P.txt", "w");
+    CUDACheck( cudaMemcpy(h_P, d_P.ptr, m * sizeof(double),
+                           cudaMemcpyDeviceToHost) );
+    for (int i = 0; i < m; i++) {
+        fprintf(fpP, "%e\t", h_P[i]);
+        if (i == m - 1) {
+            fprintf(fpP, "\n");
+        }
+    }
     // for (int i = 0; i < limit; i++) {
     while (iter < limit && nrm_R > threshold) {
         // printf("  Iteration = %d; Error Norm = %e\n", i, nrm_R);
@@ -196,6 +215,14 @@ void CG(const SymetrixSparseMatrix& A,Vector& x,const Vector& b,double tolerance
         //    (b) P_i+1 = beta * P_i + R_i+1
         CUBLASCheck( cublasDaxpy(cublasHandle, m, &beta, d_P.ptr, 1,
                                   d_P.ptr, 1) );
+        CUDACheck( cudaMemcpy(h_P, d_P.ptr, m * sizeof(double),
+                               cudaMemcpyDeviceToHost) );
+        for (int i = 0; i < m; i++) {
+            fprintf(fpP, "%e\t", h_P[i]);
+            if (i == m - 1) {
+                fprintf(fpP, "\n");
+            }
+        }
     }
     //--------------------------------------------------------------------------
     // printf("Check Solution\n"); // ||R = b - A * X||
