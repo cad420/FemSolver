@@ -13,6 +13,10 @@
 
 #include "../Math/Solver.hpp"
 
+#ifndef WITH_GRAPH
+#define WITH_GRAPH 1
+#endif
+
 inline void processCudaError(cudaError_t err, const char *file, int line) {
     if (err == cudaSuccess)
         return;
@@ -45,6 +49,8 @@ typedef struct CudaVector
 } Vec;
 
 void CG(const SymetrixSparseMatrix& A,Vector& x,const Vector& b,double tolerance,int limit,int& iter,double& norm);
+
+void CG_CG(const SymetrixSparseMatrix& A,Vector& x,const Vector& b,double tolerance,int limit,int& iter,double& norm);
 
 void PCG_ICC(const SymetrixSparseMatrix& A,Vector& x,const Vector& b,double tolerance,int limit,int& iter,double& norm);
 

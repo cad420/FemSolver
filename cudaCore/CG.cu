@@ -1,281 +1,791 @@
 #include "CG.cuh"
 
-void CG(const SymetrixSparseMatrix& A,Vector& x,const Vector& b,double tolerance,int limit,int& iter,double& norm)
-{
-    printf("CG...\n");
-    auto m_Mat = A.getMat();
-	int num_rows = m_Mat.size(), nnz = 0;
-	int m = num_rows;
-	int num_offsets = m + 1;
 
-    int*    h_A_rows    = (int*)    malloc(num_offsets * sizeof(int));
-    h_A_rows[0] = 0;
+__global__ void r1_div_x(double *r1, double *r0, double *b) {
+    int gid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid == 0) {
+        b[0] = r1[0] / r0[0];
+    }
+}
+  
+__global__ void a_minus(double *a, double *na) {
+    int gid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid == 0) {
+        na[0] = -(a[0]);
+    }
+}
+
+void CG_CG(const SymetrixSparseMatrix& A,Vector& x,const Vector& b,double tolerance,int limit,int& iter,double& norm)
+{
+    printf("CG with CUDA Graph...\n");
+    auto m_Mat = A.getMat();
+	int num_rows = m_Mat.size(), nz = 0;
+	int N = num_rows;
+	int num_offsets = N + 1;
+    double r1;
+
+    int     *h_row, *h_col;
+    double  *h_val, *h_x;
+    CUDACheck(cudaMallocHost(&h_row, num_offsets * sizeof(int)));
+    h_row[0] = 0;
 	for (int i = 0; i < m_Mat.size(); i++) {
 		for (int j = 0; j < m_Mat[i].size(); j++) {
 			if (m_Mat[i][j].second != 0.f) {
-				nnz++;
+				nz++;
 			}
 		}
-        h_A_rows[i + 1] = nnz;
+        h_row[i + 1] = nz;
 	}
 	
-    int*    h_A_columns = (int*)    malloc(nnz * sizeof(int));
-    double* h_A_values  = (double*) malloc(nnz * sizeof(double));
-    double* h_X         = (double*) malloc(m * sizeof(double));
+    CUDACheck(cudaMallocHost(&h_col, nz * sizeof(int)));
+    CUDACheck(cudaMallocHost(&h_val, nz * sizeof(double)));
+    CUDACheck(cudaMallocHost(&h_x, N * sizeof(double)));
+    double* rhs   = (double*) malloc(N * sizeof(double));
 	// from ellpack to csr
     int cnt = 0;
     for (int i = 0; i < m_Mat.size(); i++) {
 		for (int j = 0; j < m_Mat[i].size(); j++) {
 			if (m_Mat[i][j].second != 0.f) {
-				h_A_columns[cnt] = m_Mat[i][j].first;
-                h_A_values[cnt] = m_Mat[i][j].second;
+				h_col[cnt] = m_Mat[i][j].first;
+                h_val[cnt] = m_Mat[i][j].second;
                 cnt++;
 			}
 		}
 	}
-	// write A to file
-    FILE* fpA = fopen("temp/A.txt", "w");
-    for (int i = 0; i < num_offsets; i++) {
-        fprintf(fpA, "%d ", h_A_rows[i]);
-    }
-    fprintf(fpA, "\n");
-    for (int i = 0; i < nnz; i++) {
-        fprintf(fpA, "%d %10.10f\n", h_A_columns[i], h_A_values[i]);
-    }
-    for (int i = 0; i < num_rows; i++)
-        h_X[i] = 1.0;
-    //--------------------------------------------------------------------------
-    // ### Device memory management ###
-    int*    d_A_rows, *d_A_columns;
-    double* d_A_values;
-    double* h_P = (double*) malloc(m * sizeof(double));
-    Vec     d_B, d_X, d_R, d_P, d_T;
-
-    // allocate device memory for CSR matrices
-    CUDACheck( cudaMalloc((void**) &d_A_rows,    num_offsets * sizeof(int)) );
-    CUDACheck( cudaMalloc((void**) &d_A_columns, nnz * sizeof(int)) );
-    CUDACheck( cudaMalloc((void**) &d_A_values,  nnz * sizeof(double)) );
-    
-    CUDACheck( cudaMalloc((void**) &d_B.ptr,     m * sizeof(double)) );
-    CUDACheck( cudaMalloc((void**) &d_X.ptr,     m * sizeof(double)) );
-    CUDACheck( cudaMalloc((void**) &d_R.ptr,     m * sizeof(double)) );
-    CUDACheck( cudaMalloc((void**) &d_P.ptr,     m * sizeof(double)) );
-    CUDACheck( cudaMalloc((void**) &d_T.ptr,     m * sizeof(double)) );
-    
-    // copy the CSR matrices and vectors into device memory
-    CUDACheck( cudaMemcpy(d_A_rows, h_A_rows, num_offsets * sizeof(int),
-                           cudaMemcpyHostToDevice) );
-    CUDACheck( cudaMemcpy(d_A_columns, h_A_columns, nnz *  sizeof(int),
-                           cudaMemcpyHostToDevice) );
-    CUDACheck( cudaMemcpy(d_A_values, h_A_values, nnz * sizeof(double),
-                           cudaMemcpyHostToDevice) );
-    CUDACheck( cudaMemcpy(d_X.ptr, h_X, m * sizeof(double),
-                           cudaMemcpyHostToDevice) );
-    //--------------------------------------------------------------------------
-    // ### cuSPARSE Handle and descriptors initialization ###
-    // create the test matrix on the host
-    cublasHandle_t   cublasHandle   = NULL;
-    cusparseHandle_t cusparseHandle = NULL;
-    CUBLASCheck( cublasCreate(&cublasHandle) );
-    CUSPARSECheck( cusparseCreate(&cusparseHandle) );
-    // Create dense vectors
-    CUSPARSECheck( cusparseCreateDnVec(&d_B.vec,     m, d_B.ptr, CUDA_R_64F) );
-    CUSPARSECheck( cusparseCreateDnVec(&d_X.vec,     m, d_X.ptr, CUDA_R_64F) );
-    CUSPARSECheck( cusparseCreateDnVec(&d_R.vec,     m, d_R.ptr, CUDA_R_64F) );
-    CUSPARSECheck( cusparseCreateDnVec(&d_P.vec,   m, d_P.ptr,   CUDA_R_64F) );
-    CUSPARSECheck( cusparseCreateDnVec(&d_T.vec,   m, d_T.ptr,   CUDA_R_64F) );
-    
-    // copy b
     auto b_vec = b.generateScalar();
-    CUDACheck( cudaMemcpy(d_B.ptr, b_vec.data(), m * sizeof(double),
-                           cudaMemcpyHostToDevice) );
-
-    cusparseIndexBase_t  baseIdx = CUSPARSE_INDEX_BASE_ZERO;
-    cusparseSpMatDescr_t matA;
-    // A
-    CUSPARSECheck( cusparseCreateCsr(&matA, m, m, nnz, d_A_rows,
-                                      d_A_columns, d_A_values,
-                                      CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I,
-                                      baseIdx, CUDA_R_64F) );
-    
-    // ### Preparation ### 
-    const double Alpha = 0.75;
-    size_t       bufferSizeMV;
-    void*        d_bufferMV;
-    double       Beta = 0.0;
-    CUSPARSECheck( cusparseSpMV_bufferSize(
-                        cusparseHandle, CUSPARSE_OPERATION_NON_TRANSPOSE,
-                        &Alpha, matA, d_X.vec, &Beta, d_B.vec, CUDA_R_64F,
-                        CUSPARSE_SPMV_ALG_DEFAULT, &bufferSizeMV) );
-    CUDACheck( cudaMalloc(&d_bufferMV, bufferSizeMV) );
-
-    // X0 = 0
-    CUDACheck( cudaMemset(d_X.ptr, 0x0, m * sizeof(double)) );
-    //--------------------------------------------------------------------------
-    // ### Run CG computation ###
-    const double zero      = 0.0;
-    const double one       = 1.0;
-    const double minus_one = -1.0;
-    //--------------------------------------------------------------------------
-    // ### 1 ### R0 = b - A * X0 (using initial guess in X)
-    //    (a) copy b in R0
-    CUDACheck( cudaMemcpy(d_R.ptr, d_B.ptr, m * sizeof(double),
-                           cudaMemcpyDeviceToDevice) );
-    //    (b) compute R = -A * X0 + R
-    CUSPARSECheck( cusparseSpMV(cusparseHandle,
-                                 CUSPARSE_OPERATION_NON_TRANSPOSE,
-                                 &minus_one, matA, d_X.vec, &one, d_R.vec,
-                                 CUDA_R_64F, CUSPARSE_SPMV_ALG_DEFAULT,
-                                 d_bufferMV) );
-    //--------------------------------------------------------------------------
-    // ### 2 ### P0 = R0
-    CUDACheck( cudaMemcpy(d_P.ptr, d_R.ptr, m * sizeof(double),
-                           cudaMemcpyDeviceToDevice) );
-    //--------------------------------------------------------------------------
-    // nrm_R0 = ||R||
-    iter = 0;
-    norm = 1000;
-    double nrm_R;
-    CUBLASCheck( cublasDnrm2(cublasHandle, m, d_R.ptr, 1, &nrm_R) );
-    double threshold = tolerance * nrm_R;
-    printf("  Initial Residual: Norm %e' threshold %e\n", nrm_R, threshold);
-    //--------------------------------------------------------------------------
-    double delta;
-    CUBLASCheck( cublasDdot(cublasHandle, m, d_R.ptr, 1, d_R.ptr, 1, &delta) );
-    //--------------------------------------------------------------------------
-    // ### 3 ### repeat until convergence based on max iterations and
-    //           and relative residual
-    // write iterative info into file
-    FILE* fp = fopen("temp/cg_info.txt", "w");
-    fprintf(fp, "Initial Residual: Norm %e' threshold %e\n", nrm_R, threshold);
-    fprintf(fp, "Iteration\tResidual\n");
-    fprintf(fp, "%d\t%e\n", 0, nrm_R);
-
-    FILE* fpP = fopen("temp/cg_P.txt", "w");
-    CUDACheck( cudaMemcpy(h_P, d_P.ptr, m * sizeof(double),
-                           cudaMemcpyDeviceToHost) );
-    for (int i = 0; i < m; i++) {
-        fprintf(fpP, "%e\t", h_P[i]);
-        if (i == m - 1) {
-            fprintf(fpP, "\n");
-        }
-    }
-    // for (int i = 0; i < limit; i++) {
-    while (iter < limit && nrm_R > threshold) {
-        // printf("  Iteration = %d; Error Norm = %e\n", i, nrm_R);
-        //----------------------------------------------------------------------
-        // ### 4 ### alpha = (R_i, R_i) / (A * P_i, P_i)
-        //     (a) T  = A * P_i
-        CUSPARSECheck( cusparseSpMV(cusparseHandle,
-                                     CUSPARSE_OPERATION_NON_TRANSPOSE, &one,
-                                     matA, d_P.vec, &zero, d_T.vec,
-                                     CUDA_R_64F, CUSPARSE_SPMV_ALG_DEFAULT,
-                                     d_bufferMV) );
-        //     (b) denominator = (T, P_i)
-        double denominator;
-        CUBLASCheck( cublasDdot(cublasHandle, m, d_T.ptr, 1, d_P.ptr, 1,
-                                 &denominator) );
-        //     (c) alpha = delta / denominator
-        double alpha = delta / denominator;
-        // PRINT_INFO(delta)
-        // PRINT_INFO(denominator)
-        // PRINT_INFO(alpha)
-        //----------------------------------------------------------------------
-        // ### 6 ###  X_i+1 = X_i + alpha * P
-        //    (a) X_i+1 = -alpha * T + X_i
-        CUBLASCheck( cublasDaxpy(cublasHandle, m, &alpha, d_P.ptr, 1,
-                                  d_X.ptr, 1) );
-        //----------------------------------------------------------------------
-        // ### 7 ###  R_i+1 = R_i - alpha * (A * P)
-        //    (a) R_i+1 = -alpha * T + R_i
-        double minus_alpha = -alpha;
-        CUBLASCheck( cublasDaxpy(cublasHandle, m, &minus_alpha, d_T.ptr, 1,
-                                  d_R.ptr, 1) );
-        //----------------------------------------------------------------------
-        // ### 8 ###  check ||R_i+1|| < threshold
-        CUBLASCheck( cublasDnrm2(cublasHandle, m, d_R.ptr, 1, &nrm_R) );
-        fprintf(fp, "%d\t%e\n", iter + 1, nrm_R);
-        iter++;
-        if (nrm_R < threshold)
-            break;
-        //----------------------------------------------------------------------
-        // ### 8 ### beta = (R_i+1, R_i+1) / (R_i, R_i)
-        //    (a) delta_new => (R_i+1, R_i+1)
-        double delta_new;
-        CUBLASCheck( cublasDdot(cublasHandle, m, d_R.ptr, 1, d_R.ptr, 1,
-                                 &delta_new) );
-        //    (b) beta => delta_new / delta
-        double beta = delta_new / delta;
-        delta       = delta_new;
-        //----------------------------------------------------------------------
-        // ### 9 ###  P_i+1 = R_i+1 + beta * P_i
-        //    (a) copy R_i+1 in P_i
-        CUDACheck( cudaMemcpy(d_P.ptr, d_R.ptr, m * sizeof(double),
-                               cudaMemcpyDeviceToDevice) );
-        //    (b) P_i+1 = beta * P_i + R_i+1
-        CUBLASCheck( cublasDaxpy(cublasHandle, m, &beta, d_P.ptr, 1,
-                                  d_P.ptr, 1) );
-        CUDACheck( cudaMemcpy(h_P, d_P.ptr, m * sizeof(double),
-                               cudaMemcpyDeviceToHost) );
-        for (int i = 0; i < m; i++) {
-            fprintf(fpP, "%e\t", h_P[i]);
-            if (i == m - 1) {
-                fprintf(fpP, "\n");
-            }
-        }
+    for (int i = 0; i < N; i++) {
+        rhs[i] = b_vec[i];
+        h_x[i] = 0.0;
     }
     //--------------------------------------------------------------------------
-    // printf("Check Solution\n"); // ||R = b - A * X||
-    //    (a) copy b in R
-    CUDACheck( cudaMemcpy(d_R.ptr, d_B.ptr, m * sizeof(double),
-                           cudaMemcpyDeviceToDevice) );
-    // R = -A * X + R
-    CUSPARSECheck( cusparseSpMV(cusparseHandle,
-                                 CUSPARSE_OPERATION_NON_TRANSPOSE, &minus_one,
-                                 matA, d_X.vec, &one, d_R.vec, CUDA_R_64F,
-                                 CUSPARSE_SPMV_ALG_DEFAULT, d_bufferMV) );
-    // check ||R||
-    CUBLASCheck( cublasDnrm2(cublasHandle, m, d_R.ptr, 1, &nrm_R) );
-    // copy result
-    CUDACheck( cudaMemcpy(h_X, d_X.ptr, m * sizeof(double),
-                           cudaMemcpyDeviceToHost) );
-    std::vector<Scalar> xx(m);
-    for (int i = 0; i < m; i++) {
-        xx[i] = h_X[i];
+    int *d_col, *d_row;
+    double *d_val, *d_x;
+    double *d_r, *d_p, *d_Ax;
+    int k;
+    double alpha, beta, alpham1;
+    
+    cudaStream_t stream1, streamForGraph;
+    
+    /* Get handle to the CUBLAS context */
+    cublasHandle_t cublasHandle = 0;
+    CUBLASCheck(cublasCreate(&cublasHandle));
+    
+    /* Get handle to the CUSPARSE context */
+    cusparseHandle_t cusparseHandle = 0;
+    CUSPARSECheck(cusparseCreate(&cusparseHandle));
+    
+    CUDACheck(cudaStreamCreate(&stream1));
+    
+    CUDACheck(cudaMalloc((void **)&d_col, nz * sizeof(int)));
+    CUDACheck(cudaMalloc((void **)&d_row, num_offsets * sizeof(int)));
+    CUDACheck(cudaMalloc((void **)&d_val, nz * sizeof(double)));
+    CUDACheck(cudaMalloc((void **)&d_x, N * sizeof(double)));
+    CUDACheck(cudaMalloc((void **)&d_r, N * sizeof(double)));
+    CUDACheck(cudaMalloc((void **)&d_p, N * sizeof(double)));
+    CUDACheck(cudaMalloc((void **)&d_Ax, N * sizeof(double)));
+    
+    double *d_r1, *d_r0, *d_dot, *d_a, *d_na, *d_b;
+    CUDACheck(cudaMalloc((void **)&d_r1, sizeof(double)));
+    CUDACheck(cudaMalloc((void **)&d_r0, sizeof(double)));
+    CUDACheck(cudaMalloc((void **)&d_dot, sizeof(double)));
+    CUDACheck(cudaMalloc((void **)&d_a, sizeof(double)));
+    CUDACheck(cudaMalloc((void **)&d_na, sizeof(double)));
+    CUDACheck(cudaMalloc((void **)&d_b, sizeof(double)));
+    
+    /* Wrap raw data into cuSPARSE generic API objects */
+    cusparseSpMatDescr_t matA = NULL;
+    CUSPARSECheck(cusparseCreateCsr(&matA, N, N, nz, d_row, d_col, d_val,
+                                        CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I,
+                                        CUSPARSE_INDEX_BASE_ZERO, CUDA_R_64F));
+    cusparseDnVecDescr_t vecx = NULL;
+    CUSPARSECheck(cusparseCreateDnVec(&vecx, N, d_x, CUDA_R_64F));
+    cusparseDnVecDescr_t vecp = NULL;
+    CUSPARSECheck(cusparseCreateDnVec(&vecp, N, d_p, CUDA_R_64F));
+    cusparseDnVecDescr_t vecAx = NULL;
+    CUSPARSECheck(cusparseCreateDnVec(&vecAx, N, d_Ax, CUDA_R_64F));
+    
+    /* Allocate workspace for cuSPARSE */
+    size_t bufferSize = 0;
+    CUSPARSECheck(cusparseSpMV_bufferSize(
+        cusparseHandle, CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha, matA, vecx,
+        &beta, vecAx, CUDA_R_64F, CUSPARSE_SPMV_ALG_DEFAULT, &bufferSize));
+    void *buffer = NULL;
+    CUDACheck(cudaMalloc(&buffer, bufferSize));
+    
+    cusparseMatDescr_t descr = 0;
+    CUSPARSECheck(cusparseCreateMatDescr(&descr));
+    
+    CUSPARSECheck(cusparseSetMatType(descr, CUSPARSE_MATRIX_TYPE_GENERAL));
+    CUSPARSECheck(cusparseSetMatIndexBase(descr, CUSPARSE_INDEX_BASE_ZERO));
+    
+    // int numBlocks = 0, blockSize = 0;
+    // CUDACheck(
+    //     cudaOccupancyMaxPotentialBlockSize(&numBlocks, &blockSize, initVectors));
+    
+    CUDACheck(cudaMemcpyAsync(d_col, h_col, nz * sizeof(int),
+                                    cudaMemcpyHostToDevice, stream1));
+    CUDACheck(cudaMemcpyAsync(d_row, h_row, num_offsets * sizeof(int),
+                                    cudaMemcpyHostToDevice, stream1));
+    CUDACheck(cudaMemcpyAsync(d_val, h_val, nz * sizeof(double),
+                                    cudaMemcpyHostToDevice, stream1));
+    // r0 = b - A * x
+    // initVectors<<<numBlocks, blockSize, 0, stream1>>>(d_r, d_x, N);
+    CUDACheck(cudaMemcpyAsync(d_r, rhs, N * sizeof(double),
+                                    cudaMemcpyHostToDevice, stream1));
+    CUDACheck(cudaMemsetAsync(d_x, 0, N * sizeof(double), stream1));
+
+    alpha = 1.0;
+    alpham1 = -1.0;
+    beta = 0.0;
+    
+    CUSPARSECheck(cusparseSetStream(cusparseHandle, stream1));
+    CUSPARSECheck(cusparseSpMV(cusparseHandle, CUSPARSE_OPERATION_NON_TRANSPOSE,
+                                    &alpha, matA, vecx, &beta, vecAx, CUDA_R_64F,
+                                    CUSPARSE_SPMV_ALG_DEFAULT, buffer));
+    
+    CUBLASCheck(cublasSetStream(cublasHandle, stream1));
+    CUBLASCheck(cublasDaxpy(cublasHandle, N, &alpham1, d_Ax, 1, d_r, 1));
+    
+    CUBLASCheck(
+        cublasSetPointerMode(cublasHandle, CUBLAS_POINTER_MODE_DEVICE));
+    CUBLASCheck(cublasDdot(cublasHandle, N, d_r, 1, d_r, 1, d_r1));
+    
+    k = 1;
+    // First Iteration when k=1 starts
+    CUBLASCheck(cublasDcopy(cublasHandle, N, d_r, 1, d_p, 1));
+    CUSPARSECheck(cusparseSpMV(cusparseHandle, CUSPARSE_OPERATION_NON_TRANSPOSE,
+                                    &alpha, matA, vecp, &beta, vecAx, CUDA_R_64F,
+                                    CUSPARSE_SPMV_ALG_DEFAULT, buffer));
+    
+    CUBLASCheck(cublasDdot(cublasHandle, N, d_p, 1, d_Ax, 1, d_dot));
+    
+    r1_div_x<<<1, 1, 0, stream1>>>(d_r1, d_dot, d_a);
+    
+    CUBLASCheck(cublasDaxpy(cublasHandle, N, d_a, d_p, 1, d_x, 1));
+    
+    a_minus<<<1, 1, 0, stream1>>>(d_a, d_na);
+    
+    CUBLASCheck(cublasDaxpy(cublasHandle, N, d_na, d_Ax, 1, d_r, 1));
+    
+    CUDACheck(cudaMemcpyAsync(d_r0, d_r1, sizeof(double),
+                                    cudaMemcpyDeviceToDevice, stream1));
+    
+    CUBLASCheck(cublasDdot(cublasHandle, N, d_r, 1, d_r, 1, d_r1));
+    
+    CUDACheck(cudaMemcpyAsync(&r1, d_r1, sizeof(double),
+                                    cudaMemcpyDeviceToHost, stream1));
+    CUDACheck(cudaStreamSynchronize(stream1));
+    printf("iteration = %5d, residual = %e\n", k, std::sqrt(r1));
+    // First Iteration when k=1 ends
+    k++;
+    
+#if WITH_GRAPH
+    cudaGraph_t initGraph;
+    CUDACheck(cudaStreamCreate(&streamForGraph));
+    CUBLASCheck(cublasSetStream(cublasHandle, stream1));
+    CUSPARSECheck(cusparseSetStream(cusparseHandle, stream1));
+    CUDACheck(cudaStreamBeginCapture(stream1, cudaStreamCaptureModeGlobal));
+    
+    r1_div_x<<<1, 1, 0, stream1>>>(d_r1, d_r0, d_b);
+    cublasSetPointerMode(cublasHandle, CUBLAS_POINTER_MODE_DEVICE);
+    CUBLASCheck(cublasDscal(cublasHandle, N, d_b, d_p, 1));
+    cublasSetPointerMode(cublasHandle, CUBLAS_POINTER_MODE_HOST);
+    CUBLASCheck(cublasDaxpy(cublasHandle, N, &alpha, d_r, 1, d_p, 1));
+    cublasSetPointerMode(cublasHandle, CUBLAS_POINTER_MODE_DEVICE);
+    
+    CUSPARSECheck(
+        cusparseSetPointerMode(cusparseHandle, CUSPARSE_POINTER_MODE_HOST));
+    CUSPARSECheck(cusparseSpMV(cusparseHandle, CUSPARSE_OPERATION_NON_TRANSPOSE,
+                                    &alpha, matA, vecp, &beta, vecAx, CUDA_R_64F,
+                                    CUSPARSE_SPMV_ALG_DEFAULT, buffer));
+    
+    CUDACheck(cudaMemsetAsync(d_dot, 0, sizeof(double), stream1));
+    CUBLASCheck(cublasDdot(cublasHandle, N, d_p, 1, d_Ax, 1, d_dot));
+    
+    r1_div_x<<<1, 1, 0, stream1>>>(d_r1, d_dot, d_a);
+    
+    CUBLASCheck(cublasDaxpy(cublasHandle, N, d_a, d_p, 1, d_x, 1));
+    
+    a_minus<<<1, 1, 0, stream1>>>(d_a, d_na);
+    
+    CUBLASCheck(cublasDaxpy(cublasHandle, N, d_na, d_Ax, 1, d_r, 1));
+    
+    CUDACheck(cudaMemcpyAsync(d_r0, d_r1, sizeof(double),
+                                    cudaMemcpyDeviceToDevice, stream1));
+    CUDACheck(cudaMemsetAsync(d_r1, 0, sizeof(double), stream1));
+    
+    CUBLASCheck(cublasDdot(cublasHandle, N, d_r, 1, d_r, 1, d_r1));
+    
+    CUDACheck(cudaMemcpyAsync((double *)&r1, d_r1, sizeof(double),
+                                    cudaMemcpyDeviceToHost, stream1));
+    
+    CUDACheck(cudaStreamEndCapture(stream1, &initGraph));
+    cudaGraphExec_t graphExec;
+    CUDACheck(cudaGraphInstantiate(&graphExec, initGraph, NULL, NULL, 0));
+#endif
+    
+    CUBLASCheck(cublasSetStream(cublasHandle, stream1));
+    CUSPARSECheck(cusparseSetStream(cusparseHandle, stream1));
+    
+    // iteration
+    // r1 > tolerance * tolerance * r0
+    while (r1 > tolerance * tolerance && k <= limit) {
+#if WITH_GRAPH
+        CUDACheck(cudaGraphLaunch(graphExec, streamForGraph));
+        CUDACheck(cudaStreamSynchronize(streamForGraph));
+#else
+        r1_div_x<<<1, 1, 0, stream1>>>(d_r1, d_r0, d_b);
+        cublasSetPointerMode(cublasHandle, CUBLAS_POINTER_MODE_DEVICE);
+        CUBLASCheck(cublasDscal(cublasHandle, N, d_b, d_p, 1));
+    
+        cublasSetPointerMode(cublasHandle, CUBLAS_POINTER_MODE_HOST);
+        CUBLASCheck(cublasDaxpy(cublasHandle, N, &alpha, d_r, 1, d_p, 1));
+    
+        CUSPARSECheck(cusparseSpMV(
+            cusparseHandle, CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha, matA, vecp,
+            &beta, vecAx, CUDA_R_64F, CUSPARSE_SPMV_ALG_DEFAULT, buffer));
+    
+        cublasSetPointerMode(cublasHandle, CUBLAS_POINTER_MODE_DEVICE);
+        CUBLASCheck(cublasDdot(cublasHandle, N, d_p, 1, d_Ax, 1, d_dot));
+    
+        r1_div_x<<<1, 1, 0, stream1>>>(d_r1, d_dot, d_a);
+    
+        CUBLASCheck(cublasDaxpy(cublasHandle, N, d_a, d_p, 1, d_x, 1));
+    
+        a_minus<<<1, 1, 0, stream1>>>(d_a, d_na);
+        CUBLASCheck(cublasDaxpy(cublasHandle, N, d_na, d_Ax, 1, d_r, 1));
+    
+        CUDACheck(cudaMemcpyAsync(d_r0, d_r1, sizeof(double),
+                                        cudaMemcpyDeviceToDevice, stream1));
+    
+        CUBLASCheck(cublasDdot(cublasHandle, N, d_r, 1, d_r, 1, d_r1));
+        CUDACheck(cudaMemcpyAsync((double *)&r1, d_r1, sizeof(double),
+                                        cudaMemcpyDeviceToHost, stream1));
+        CUDACheck(cudaStreamSynchronize(stream1));
+#endif
+        // printf("iteration = %5d, residual = %e\n", k, std::sqrt(r1));
+        k++;
     }
     
-    norm = nrm_R;// * tolerance;
-    printf("Final iterations: %d error norm = %e\n", iter, norm);
+#if WITH_GRAPH
+    CUDACheck(cudaMemcpyAsync(h_x, d_x, N * sizeof(double),
+                                    cudaMemcpyDeviceToHost, streamForGraph));
+    CUDACheck(cudaStreamSynchronize(streamForGraph));
+#else
+    CUDACheck(cudaMemcpyAsync(h_x, d_x, N * sizeof(double),
+                                    cudaMemcpyDeviceToHost, stream1));
+    CUDACheck(cudaStreamSynchronize(stream1));
+#endif
     
-    //--------------------------------------------------------------------------
+    // double rsum, diff, err = 0.0;
+    
+    // for (int i = 0; i < N; i++) {
+    //     rsum = 0.0;
+    
+    //     for (int j = h_row[i]; j < h_row[i + 1]; j++) {
+    //         rsum += h_val[j] * h_x[h_col[j]];
+    //     }
+    
+    //     diff = fabs(rsum - rhs[i]);
+    
+    //     if (diff > err) {
+    //         err = diff;
+    //     }
+    // }
+    
+    std::vector<double> xx(N);
+    for (int i = 0; i < N; i++) {
+        xx[i] = h_x[i];
+    }
+
+    // save iteration info
+    iter = k;
+    norm = std::sqrt(r1);
     x.setvalues({xx.begin(), xx.end()});
 
-    //--------------------------------------------------------------------------
-    // ### Free resources ###
-    CUSPARSECheck( cusparseDestroyDnVec(d_B.vec) );
-    CUSPARSECheck( cusparseDestroyDnVec(d_X.vec) );
-    CUSPARSECheck( cusparseDestroyDnVec(d_R.vec) );
-    CUSPARSECheck( cusparseDestroyDnVec(d_P.vec) );
-    CUSPARSECheck( cusparseDestroyDnVec(d_T.vec) );
-    CUSPARSECheck( cusparseDestroySpMat(matA) );
-    CUSPARSECheck( cusparseDestroy(cusparseHandle) );
-    CUBLASCheck( cublasDestroy(cublasHandle) );
-
-    free(h_A_rows);
-    free(h_A_columns);
-    free(h_A_values);
-    free(h_X);
-
-    CUDACheck( cudaFree(d_X.ptr) );
-    CUDACheck( cudaFree(d_B.ptr) );
-    CUDACheck( cudaFree(d_R.ptr) );
-    CUDACheck( cudaFree(d_P.ptr) );
-    CUDACheck( cudaFree(d_T.ptr) );
-    CUDACheck( cudaFree(d_A_values) );
-    CUDACheck( cudaFree(d_A_columns) );
-    CUDACheck( cudaFree(d_A_rows) );
-    CUDACheck( cudaFree(d_bufferMV) );
+#if WITH_GRAPH
+    CUDACheck(cudaGraphExecDestroy(graphExec));
+    CUDACheck(cudaGraphDestroy(initGraph));
+    CUDACheck(cudaStreamDestroy(streamForGraph));
+#endif
+    CUDACheck(cudaStreamDestroy(stream1));
+    cusparseDestroy(cusparseHandle);
+    cublasDestroy(cublasHandle);
+    
+    if (matA) {
+        CUSPARSECheck(cusparseDestroySpMat(matA));
+    }
+    if (vecx) {
+        CUSPARSECheck(cusparseDestroyDnVec(vecx));
+    }
+    if (vecAx) {
+        CUSPARSECheck(cusparseDestroyDnVec(vecAx));
+    }
+    if (vecp) {
+        CUSPARSECheck(cusparseDestroyDnVec(vecp));
+    }
+    
+    CUDACheck(cudaFreeHost(h_row));
+    CUDACheck(cudaFreeHost(h_col));
+    CUDACheck(cudaFreeHost(h_val));
+    CUDACheck(cudaFreeHost(h_x));
+    free(rhs);
+    CUDACheck(cudaFree(d_col));
+    CUDACheck(cudaFree(d_row));
+    CUDACheck(cudaFree(d_val));
+    CUDACheck(cudaFree(d_x));
+    CUDACheck(cudaFree(d_r));
+    CUDACheck(cudaFree(d_p));
+    CUDACheck(cudaFree(d_Ax));
+    
+    // printf("Test Summary:  Error amount = %f\n", err);
+    // exit((k <= limit) ? 0 : 1);
     return ;
+}
+
+void CG(const SymetrixSparseMatrix& A,Vector& x,const Vector& b,double tolerance,int limit,int& iter,double& norm)
+{
+    printf("CG...\n");
+    auto m_Mat = A.getMat();
+	int num_rows = m_Mat.size(), nz = 0;
+	int N = num_rows;
+	int num_offsets = N + 1;
+
+    int *h_row = (int *)malloc(num_offsets * sizeof(int));
+    h_row[0] = 0;
+	for (int i = 0; i < m_Mat.size(); i++) {
+		for (int j = 0; j < m_Mat[i].size(); j++) {
+			if (m_Mat[i][j].second != 0.f) {
+				nz++;
+			}
+		}
+        h_row[i + 1] = nz;
+	}
+	 
+    int *h_col = (int *)malloc(nz * sizeof(int));
+    double *h_val = (double *)malloc(nz * sizeof(double));
+    double *h_x = (double *)malloc(N * sizeof(double));
+    double *rhs   = (double*) malloc(N * sizeof(double));
+	// from ellpack to csr
+    int cnt = 0;
+    for (int i = 0; i < m_Mat.size(); i++) {
+		for (int j = 0; j < m_Mat[i].size(); j++) {
+			if (m_Mat[i][j].second != 0.f) {
+				h_col[cnt] = m_Mat[i][j].first;
+                h_val[cnt] = m_Mat[i][j].second;
+                cnt++;
+			}
+		}
+	}
+    auto b_vec = b.generateScalar();
+    for (int i = 0; i < N; i++) {
+        rhs[i] = b_vec[i];
+        h_x[i] = 0.0;
+    }
+    //--------------------------------------------------------------------------
+    int *d_col, *d_row;
+    double *d_val, *d_x;
+    double *d_r, *d_p, *d_Ax;
+    int k;
+    double a, bb, na, r0, r1, dot;
+    double alpha, beta, alpham1;
+    
+    /* Get handle to the CUBLAS context */
+    cublasHandle_t cublasHandle = 0;
+    CUBLASCheck(cublasCreate(&cublasHandle));
+    
+    /* Get handle to the CUSPARSE context */
+    cusparseHandle_t cusparseHandle = 0;
+    CUSPARSECheck(cusparseCreate(&cusparseHandle));
+    
+    CUDACheck(cudaMalloc((void **)&d_col, nz * sizeof(int)));
+    CUDACheck(cudaMalloc((void **)&d_row, num_offsets * sizeof(int)));
+    CUDACheck(cudaMalloc((void **)&d_val, nz * sizeof(double)));
+    CUDACheck(cudaMalloc((void **)&d_x, N * sizeof(double)));
+    CUDACheck(cudaMalloc((void **)&d_r, N * sizeof(double)));
+    CUDACheck(cudaMalloc((void **)&d_p, N * sizeof(double)));
+    CUDACheck(cudaMalloc((void **)&d_Ax, N * sizeof(double)));
+    
+    /* Wrap raw data into cuSPARSE generic API objects */
+    cusparseSpMatDescr_t matA = NULL;
+    CUSPARSECheck(cusparseCreateCsr(&matA, N, N, nz, d_row, d_col, d_val,
+                                        CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I,
+                                        CUSPARSE_INDEX_BASE_ZERO, CUDA_R_64F));
+    cusparseDnVecDescr_t vecx = NULL;
+    CUSPARSECheck(cusparseCreateDnVec(&vecx, N, d_x, CUDA_R_64F));
+    cusparseDnVecDescr_t vecp = NULL;
+    CUSPARSECheck(cusparseCreateDnVec(&vecp, N, d_p, CUDA_R_64F));
+    cusparseDnVecDescr_t vecAx = NULL;
+    CUSPARSECheck(cusparseCreateDnVec(&vecAx, N, d_Ax, CUDA_R_64F));
+    
+    /* Initialize problem data */
+    CUDACheck(cudaMemcpy(d_col, h_col, nz * sizeof(int), cudaMemcpyHostToDevice));
+    CUDACheck(cudaMemcpy(d_row, h_row, num_offsets * sizeof(int), cudaMemcpyHostToDevice));
+    CUDACheck(cudaMemcpy(d_val, h_val, nz * sizeof(double), cudaMemcpyHostToDevice));
+    CUDACheck(cudaMemcpy(d_x, h_x, N * sizeof(double), cudaMemcpyHostToDevice));
+    CUDACheck(cudaMemcpy(d_r, rhs, N * sizeof(double), cudaMemcpyHostToDevice));
+
+    alpha = 1.0;
+    alpham1 = -1.0;
+    beta = 0.0;
+    r0 = 0.0;
+    /* Allocate workspace for cuSPARSE */
+    size_t bufferSize = 0;
+    CUSPARSECheck(cusparseSpMV_bufferSize(
+        cusparseHandle, CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha, matA, vecx,
+        &beta, vecAx, CUDA_R_64F, CUSPARSE_SPMV_ALG_DEFAULT, &bufferSize));
+    void *buffer = NULL; 
+    CUDACheck(cudaMalloc(&buffer, bufferSize));
+    
+    CUSPARSECheck(cusparseSpMV(cusparseHandle, CUSPARSE_OPERATION_NON_TRANSPOSE,
+                                    &alpha, matA, vecx, &beta, vecAx, CUDA_R_64F,
+                                    CUSPARSE_SPMV_ALG_DEFAULT, buffer));
+    CUBLASCheck(cublasDaxpy(cublasHandle, N, &alpham1, d_Ax, 1, d_r, 1));
+    CUBLASCheck(cublasDdot(cublasHandle, N, d_r, 1, d_r, 1, &r1));
+    
+    k = 1;
+    while (r1 > tolerance * tolerance && k <= limit) {
+        if (k > 1) {
+            bb = r1 / r0;
+            CUBLASCheck(cublasDscal(cublasHandle, N, &bb, d_p, 1));
+            CUBLASCheck(cublasDaxpy(cublasHandle, N, &alpha, d_r, 1, d_p, 1));
+        } else {
+            CUBLASCheck(cublasDcopy(cublasHandle, N, d_r, 1, d_p, 1));
+        }
+
+        CUSPARSECheck(cusparseSpMV(cusparseHandle, 
+            CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha, matA, vecp, &beta, vecAx, 
+            CUDA_R_64F, CUSPARSE_SPMV_ALG_DEFAULT, buffer));
+        CUBLASCheck(cublasDdot(cublasHandle, N, d_p, 1, d_Ax, 1, &dot));
+        a = r1 / dot;
+
+        CUBLASCheck(cublasDaxpy(cublasHandle, N, &a, d_p, 1, d_x, 1));
+        na = -a;
+        CUBLASCheck(cublasDaxpy(cublasHandle, N, &na, d_Ax, 1, d_r, 1));
+
+        r0 = r1;
+        CUBLASCheck(cublasDdot(cublasHandle, N, d_r, 1, d_r, 1, &r1));
+        cudaDeviceSynchronize();
+        
+        k++;
+    }
+    
+    CUDACheck(cudaMemcpy(h_x, d_x, N * sizeof(double), cudaMemcpyDeviceToHost));
+    
+    std::vector<double> xx(N);
+    for (int i = 0; i < N; i++) {
+        xx[i] = h_x[i];
+    }
+
+    // save iteration info
+    iter = k;
+    norm = std::sqrt(r1);
+    x.setvalues({xx.begin(), xx.end()});
+
+    cusparseDestroy(cusparseHandle);
+    cublasDestroy(cublasHandle);
+    
+    if (matA) {
+        CUSPARSECheck(cusparseDestroySpMat(matA));
+    }
+    if (vecx) {
+        CUSPARSECheck(cusparseDestroyDnVec(vecx));
+    }
+    if (vecAx) {
+        CUSPARSECheck(cusparseDestroyDnVec(vecAx));
+    }
+    if (vecp) {
+        CUSPARSECheck(cusparseDestroyDnVec(vecp));
+    }
+    
+    free(h_row);
+    free(h_col);
+    free(h_val);
+    free(h_x);
+    free(rhs);
+    CUDACheck(cudaFree(d_col));
+    CUDACheck(cudaFree(d_row));
+    CUDACheck(cudaFree(d_val));
+    CUDACheck(cudaFree(d_x));
+    CUDACheck(cudaFree(d_r));
+    CUDACheck(cudaFree(d_p));
+    CUDACheck(cudaFree(d_Ax));
+
+    return ;
+
+    // auto m_Mat = A.getMat();
+	// int num_rows = m_Mat.size(), nnz = 0;
+	// int m = num_rows;
+	// int num_offsets = m + 1;
+
+    // int*    h_A_rows    = (int*)    malloc(num_offsets * sizeof(int));
+    // h_A_rows[0] = 0;
+	// for (int i = 0; i < m_Mat.size(); i++) {
+	// 	for (int j = 0; j < m_Mat[i].size(); j++) {
+	// 		if (m_Mat[i][j].second != 0.f) {
+	// 			nnz++;
+	// 		}
+	// 	}
+    //     h_A_rows[i + 1] = nnz;
+	// }
+	
+    // int*    h_A_columns = (int*)    malloc(nnz * sizeof(int));
+    // double* h_A_values  = (double*) malloc(nnz * sizeof(double));
+    // double* h_X         = (double*) malloc(m * sizeof(double));
+	// // from ellpack to csr
+    // int cnt = 0;
+    // for (int i = 0; i < m_Mat.size(); i++) {
+	// 	for (int j = 0; j < m_Mat[i].size(); j++) {
+	// 		if (m_Mat[i][j].second != 0.f) {
+	// 			h_A_columns[cnt] = m_Mat[i][j].first;
+    //             h_A_values[cnt] = m_Mat[i][j].second;
+    //             cnt++;
+	// 		}
+	// 	}
+	// }
+	// // write A to file
+    // // FILE* fpA = fopen("temp/A.txt", "w");
+    // // for (int i = 0; i < num_offsets; i++) {
+    // //     fprintf(fpA, "%d ", h_A_rows[i]);
+    // // }
+    // // fprintf(fpA, "\n");
+    // // for (int i = 0; i < nnz; i++) {
+    // //     fprintf(fpA, "%d %10.10f\n", h_A_columns[i], h_A_values[i]);
+    // // }
+    // for (int i = 0; i < num_rows; i++)
+    //     h_X[i] = 1.0;
+    // //--------------------------------------------------------------------------
+    // // ### Device memory management ###
+    // int*    d_A_rows, *d_A_columns;
+    // double* d_A_values;
+    // double* h_P = (double*) malloc(m * sizeof(double));
+    // Vec     d_B, d_X, d_R, d_P, d_T;
+
+    // // allocate device memory for CSR matrices
+    // CUDACheck( cudaMalloc((void**) &d_A_rows,    num_offsets * sizeof(int)) );
+    // CUDACheck( cudaMalloc((void**) &d_A_columns, nnz * sizeof(int)) );
+    // CUDACheck( cudaMalloc((void**) &d_A_values,  nnz * sizeof(double)) );
+    
+    // CUDACheck( cudaMalloc((void**) &d_B.ptr,     m * sizeof(double)) );
+    // CUDACheck( cudaMalloc((void**) &d_X.ptr,     m * sizeof(double)) );
+    // CUDACheck( cudaMalloc((void**) &d_R.ptr,     m * sizeof(double)) );
+    // CUDACheck( cudaMalloc((void**) &d_P.ptr,     m * sizeof(double)) );
+    // CUDACheck( cudaMalloc((void**) &d_T.ptr,     m * sizeof(double)) );
+    
+    // // copy the CSR matrices and vectors into device memory
+    // CUDACheck( cudaMemcpy(d_A_rows, h_A_rows, num_offsets * sizeof(int),
+    //                        cudaMemcpyHostToDevice) );
+    // CUDACheck( cudaMemcpy(d_A_columns, h_A_columns, nnz *  sizeof(int),
+    //                        cudaMemcpyHostToDevice) );
+    // CUDACheck( cudaMemcpy(d_A_values, h_A_values, nnz * sizeof(double),
+    //                        cudaMemcpyHostToDevice) );
+    // CUDACheck( cudaMemcpy(d_X.ptr, h_X, m * sizeof(double),
+    //                        cudaMemcpyHostToDevice) );
+    // //--------------------------------------------------------------------------
+    // // ### cuSPARSE Handle and descriptors initialization ###
+    // // create the test matrix on the host
+    // cublasHandle_t   cublasHandle   = NULL;
+    // cusparseHandle_t cusparseHandle = NULL;
+    // CUBLASCheck( cublasCreate(&cublasHandle) );
+    // CUSPARSECheck( cusparseCreate(&cusparseHandle) );
+    // // Create dense vectors
+    // CUSPARSECheck( cusparseCreateDnVec(&d_B.vec,     m, d_B.ptr, CUDA_R_64F) );
+    // CUSPARSECheck( cusparseCreateDnVec(&d_X.vec,     m, d_X.ptr, CUDA_R_64F) );
+    // CUSPARSECheck( cusparseCreateDnVec(&d_R.vec,     m, d_R.ptr, CUDA_R_64F) );
+    // CUSPARSECheck( cusparseCreateDnVec(&d_P.vec,   m, d_P.ptr,   CUDA_R_64F) );
+    // CUSPARSECheck( cusparseCreateDnVec(&d_T.vec,   m, d_T.ptr,   CUDA_R_64F) );
+    
+    // // copy b
+    // auto b_vec = b.generateScalar();
+    // CUDACheck( cudaMemcpy(d_B.ptr, b_vec.data(), m * sizeof(double),
+    //                        cudaMemcpyHostToDevice) );
+
+    // cusparseIndexBase_t  baseIdx = CUSPARSE_INDEX_BASE_ZERO;
+    // cusparseSpMatDescr_t matA;
+    // // A
+    // CUSPARSECheck( cusparseCreateCsr(&matA, m, m, nnz, d_A_rows,
+    //                                   d_A_columns, d_A_values,
+    //                                   CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I,
+    //                                   baseIdx, CUDA_R_64F) );
+    
+    // // ### Preparation ### 
+    // const double Alpha = 0.75;
+    // size_t       bufferSizeMV;
+    // void*        d_bufferMV;
+    // double       Beta = 0.0;
+    // CUSPARSECheck( cusparseSpMV_bufferSize(
+    //                     cusparseHandle, CUSPARSE_OPERATION_NON_TRANSPOSE,
+    //                     &Alpha, matA, d_X.vec, &Beta, d_B.vec, CUDA_R_64F,
+    //                     CUSPARSE_SPMV_ALG_DEFAULT, &bufferSizeMV) );
+    // CUDACheck( cudaMalloc(&d_bufferMV, bufferSizeMV) );
+
+    // // X0 = 0
+    // CUDACheck( cudaMemset(d_X.ptr, 0x0, m * sizeof(double)) );
+    // //--------------------------------------------------------------------------
+    // // ### Run CG computation ###
+    // const double zero      = 0.0;
+    // const double one       = 1.0;
+    // const double minus_one = -1.0;
+    // //--------------------------------------------------------------------------
+    // // ### 1 ### R0 = b - A * X0 (using initial guess in X)
+    // //    (a) copy b in R0
+    // CUDACheck( cudaMemcpy(d_R.ptr, d_B.ptr, m * sizeof(double),
+    //                        cudaMemcpyDeviceToDevice) );
+    // //    (b) compute R = -A * X0 + R
+    // CUSPARSECheck( cusparseSpMV(cusparseHandle,
+    //                              CUSPARSE_OPERATION_NON_TRANSPOSE,
+    //                              &minus_one, matA, d_X.vec, &one, d_R.vec,
+    //                              CUDA_R_64F, CUSPARSE_SPMV_ALG_DEFAULT,
+    //                              d_bufferMV) );
+    // //--------------------------------------------------------------------------
+    // // ### 2 ### P0 = R0
+    // CUDACheck( cudaMemcpy(d_P.ptr, d_R.ptr, m * sizeof(double),
+    //                        cudaMemcpyDeviceToDevice) );
+    // //--------------------------------------------------------------------------
+    // // nrm_R0 = ||R||
+    // iter = 0;
+    // norm = 1000;
+    // double nrm_R;
+    // CUBLASCheck( cublasDnrm2(cublasHandle, m, d_R.ptr, 1, &nrm_R) );
+    // double threshold = tolerance * nrm_R;
+    // printf("  Initial Residual: Norm %e' threshold %e\n", nrm_R, threshold);
+    // //--------------------------------------------------------------------------
+    // double delta;
+    // CUBLASCheck( cublasDdot(cublasHandle, m, d_R.ptr, 1, d_R.ptr, 1, &delta) );
+    // //--------------------------------------------------------------------------
+    // // ### 3 ### repeat until convergence based on max iterations and
+    // //           and relative residual
+    // // write iterative info into file
+    // // FILE* fp = fopen("temp/cg_info.txt", "w");
+    // // fprintf(fp, "Initial Residual: Norm %e' threshold %e\n", nrm_R, threshold);
+    // // fprintf(fp, "Iteration\tResidual\n");
+    // // fprintf(fp, "%d\t%e\n", 0, nrm_R);
+
+    // // FILE* fpP = fopen("temp/cg_P.txt", "w");
+    // CUDACheck( cudaMemcpy(h_P, d_P.ptr, m * sizeof(double),
+    //                        cudaMemcpyDeviceToHost) );
+    // // for (int i = 0; i < m; i++) {
+    // //     fprintf(fpP, "%e\t", h_P[i]);
+    // //     if (i == m - 1) {
+    // //         fprintf(fpP, "\n");
+    // //     }
+    // // }
+    // // for (int i = 0; i < limit; i++) {
+    // while (iter < limit && nrm_R > threshold) {
+    //     // printf("  Iteration = %d; Error Norm = %e\n", i, nrm_R);
+    //     //----------------------------------------------------------------------
+    //     // ### 4 ### alpha = (R_i, R_i) / (A * P_i, P_i)
+    //     //     (a) T  = A * P_i
+    //     CUSPARSECheck( cusparseSpMV(cusparseHandle,
+    //                                  CUSPARSE_OPERATION_NON_TRANSPOSE, &one,
+    //                                  matA, d_P.vec, &zero, d_T.vec,
+    //                                  CUDA_R_64F, CUSPARSE_SPMV_ALG_DEFAULT,
+    //                                  d_bufferMV) );
+    //     //     (b) denominator = (T, P_i)
+    //     double denominator;
+    //     CUBLASCheck( cublasDdot(cublasHandle, m, d_T.ptr, 1, d_P.ptr, 1,
+    //                              &denominator) );
+    //     //     (c) alpha = delta / denominator
+    //     double alpha = delta / denominator;
+    //     // PRINT_INFO(delta)
+    //     // PRINT_INFO(denominator)
+    //     // PRINT_INFO(alpha)
+    //     //----------------------------------------------------------------------
+    //     // ### 6 ###  X_i+1 = X_i + alpha * P
+    //     //    (a) X_i+1 = -alpha * T + X_i
+    //     CUBLASCheck( cublasDaxpy(cublasHandle, m, &alpha, d_P.ptr, 1,
+    //                               d_X.ptr, 1) );
+    //     //----------------------------------------------------------------------
+    //     // ### 7 ###  R_i+1 = R_i - alpha * (A * P)
+    //     //    (a) R_i+1 = -alpha * T + R_i
+    //     double minus_alpha = -alpha;
+    //     CUBLASCheck( cublasDaxpy(cublasHandle, m, &minus_alpha, d_T.ptr, 1,
+    //                               d_R.ptr, 1) );
+    //     //----------------------------------------------------------------------
+    //     // ### 8 ###  check ||R_i+1|| < threshold
+    //     CUBLASCheck( cublasDnrm2(cublasHandle, m, d_R.ptr, 1, &nrm_R) );
+    //     // fprintf(fp, "%d\t%e\n", iter + 1, nrm_R);
+    //     iter++;
+    //     if (nrm_R < threshold)
+    //         break;
+    //     //----------------------------------------------------------------------
+    //     // ### 8 ### beta = (R_i+1, R_i+1) / (R_i, R_i)
+    //     //    (a) delta_new => (R_i+1, R_i+1)
+    //     double delta_new;
+    //     CUBLASCheck( cublasDdot(cublasHandle, m, d_R.ptr, 1, d_R.ptr, 1,
+    //                              &delta_new) );
+    //     //    (b) beta => delta_new / delta
+    //     double beta = delta_new / delta;
+    //     delta       = delta_new;
+    //     //----------------------------------------------------------------------
+    //     // ### 9 ###  P_i+1 = R_i+1 + beta * P_i
+    //     //    (a) copy R_i+1 in P_i
+    //     CUDACheck( cudaMemcpy(d_P.ptr, d_R.ptr, m * sizeof(double),
+    //                            cudaMemcpyDeviceToDevice) );
+    //     //    (b) P_i+1 = beta * P_i + R_i+1
+    //     CUBLASCheck( cublasDaxpy(cublasHandle, m, &beta, d_P.ptr, 1,
+    //                               d_P.ptr, 1) );
+    //     CUDACheck( cudaMemcpy(h_P, d_P.ptr, m * sizeof(double),
+    //                            cudaMemcpyDeviceToHost) );
+    //     // for (int i = 0; i < m; i++) {
+    //     //     fprintf(fpP, "%e\t", h_P[i]);
+    //     //     if (i == m - 1) {
+    //     //         fprintf(fpP, "\n");
+    //     //     }
+    //     // }
+    // }
+    // //--------------------------------------------------------------------------
+    // // printf("Check Solution\n"); // ||R = b - A * X||
+    // //    (a) copy b in R
+    // CUDACheck( cudaMemcpy(d_R.ptr, d_B.ptr, m * sizeof(double),
+    //                        cudaMemcpyDeviceToDevice) );
+    // // R = -A * X + R
+    // CUSPARSECheck( cusparseSpMV(cusparseHandle,
+    //                              CUSPARSE_OPERATION_NON_TRANSPOSE, &minus_one,
+    //                              matA, d_X.vec, &one, d_R.vec, CUDA_R_64F,
+    //                              CUSPARSE_SPMV_ALG_DEFAULT, d_bufferMV) );
+    // // check ||R||
+    // CUBLASCheck( cublasDnrm2(cublasHandle, m, d_R.ptr, 1, &nrm_R) );
+    // // copy result
+    // CUDACheck( cudaMemcpy(h_X, d_X.ptr, m * sizeof(double),
+    //                        cudaMemcpyDeviceToHost) );
+    // std::vector<Scalar> xx(m);
+    // for (int i = 0; i < m; i++) {
+    //     xx[i] = h_X[i];
+    // }
+    
+    // norm = nrm_R;// * tolerance;
+    // printf("Final iterations: %d error norm = %e\n", iter, norm);
+    
+    // //--------------------------------------------------------------------------
+    // x.setvalues({xx.begin(), xx.end()});
+
+    // //--------------------------------------------------------------------------
+    // // ### Free resources ###
+    // CUSPARSECheck( cusparseDestroyDnVec(d_B.vec) );
+    // CUSPARSECheck( cusparseDestroyDnVec(d_X.vec) );
+    // CUSPARSECheck( cusparseDestroyDnVec(d_R.vec) );
+    // CUSPARSECheck( cusparseDestroyDnVec(d_P.vec) );
+    // CUSPARSECheck( cusparseDestroyDnVec(d_T.vec) );
+    // CUSPARSECheck( cusparseDestroySpMat(matA) );
+    // CUSPARSECheck( cusparseDestroy(cusparseHandle) );
+    // CUBLASCheck( cublasDestroy(cublasHandle) );
+
+    // free(h_A_rows);
+    // free(h_A_columns);
+    // free(h_A_values);
+    // free(h_X);
+
+    // CUDACheck( cudaFree(d_X.ptr) );
+    // CUDACheck( cudaFree(d_B.ptr) );
+    // CUDACheck( cudaFree(d_R.ptr) );
+    // CUDACheck( cudaFree(d_P.ptr) );
+    // CUDACheck( cudaFree(d_T.ptr) );
+    // CUDACheck( cudaFree(d_A_values) );
+    // CUDACheck( cudaFree(d_A_columns) );
+    // CUDACheck( cudaFree(d_A_rows) );
+    // CUDACheck( cudaFree(d_bufferMV) );
+    // return ;
 }
 
 void PCG_ICC(const SymetrixSparseMatrix& A,Vector& x,const Vector& b,double tolerance,int limit,int& iter,double& norm)
