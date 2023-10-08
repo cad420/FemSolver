@@ -15,6 +15,259 @@ __global__ void a_minus(double *a, double *na) {
     }
 }
 
+__device__ void gpuSpMV(int *row, int *col, double *val, int nz, int N, double alpha, double *x_vec, double *Ax, cg::thread_block &cta, const cg::grid_group &grid)
+{
+    for (int i = grid.thread_rank(); i < N; i += grid.size()) {
+        int row_elem = row[i];
+        int next_row_elem = row[i + 1];
+        int num_elems_this_row = next_row_elem - row_elem;
+
+        double output = 0.0;
+        for (int j = 0; j < num_elems_this_row; j++) {
+            output += alpha * val[row_elem + j] * x_vec[col[row_elem + j]];
+        }
+        Ax[i] = output;
+    }
+}
+
+__device__ void gpuDaxpy(double *x, double *y, double a, int size, const cg::grid_group &grid)
+{
+    for (int i = grid.thread_rank(); i < size; i += grid.size()) {
+        y[i] += a * x[i] + y[i];
+    }
+}
+
+__device__ void gpuDcopy(double *x, double *y, int size, const cg::grid_group &grid)
+{
+    for (int i = grid.thread_rank(); i < size; i += grid.size()) {
+        y[i] = x[i];
+    }
+}
+
+__device__ void gpuDaxpby(const double *x, double *y, double a, double b, int size, const cg::grid_group &grid)
+{
+    for (int i = grid.thread_rank(); i < size; i += grid.size()) {
+        y[i] = a * x[i] + b * y[i];
+    }
+}
+
+__device__ void gpuDdot(double *x, double *y, double *result, int size, const cg::thread_block &cta, const cg::grid_group &grid)
+{
+    extern __shared__ double tmp[];
+
+    double temp_sum = 0.0;
+    for (int i = grid.thread_rank(); i < size; i += grid.size()) {
+        temp_sum += static_cast<double>(x[i] * y[i]);
+    }
+
+    cg::thread_block_tile<32> tile32 = cg::tiled_partition<32>(cta);
+
+    temp_sum = cg::reduce(tile32, temp_sum, cg::plus<double>());
+
+    if (tile32.thread_rank() == 0) {
+        tmp[tile32.meta_group_rank()] = temp_sum;    
+    }
+
+    cg::sync(cta);
+
+    if (tile32.meta_group_rank() == 0) {
+        temp_sum = tile32.thread_rank() < tile32.meta_group_size() ? tmp[tile32.thread_rank()] : 0.0;
+        temp_sum = cg::reduce(tile32, temp_sum, cg::plus<double>());
+
+        if (tile32.thread_rank() == 0) {
+            atomicAdd(result, temp_sum);
+        }
+    }
+}
+
+extern "C" __global void CG_MBCG_kernel(int *row, int *col, double *val, double *x_vec, double *Ax, double *p, double *r, double *dot_result, int nz, int N, double tolerance, int limit)
+{
+    cg::thread_block cta = cg::this_thread_block();
+    cg::grid_group grid = cg::this_grid();
+
+    double alpha = 1.0;
+    double alpham1 = -1.0;
+    double r0 = 0.0, r1, bb, a, na;
+
+    gpuSpMV(row, col, val, nz, N, alpha, x_vec, Ax, cta, grid);
+    cg::sync(grid);
+
+    gpuDaxpy(Ax, r, alpham1, N, grid);
+    cg::sync(grid);
+
+    gpuDdot(r, r, dot_result, N, cta, grid);
+    cg::sync(grid);
+
+    r1 = *dot_result;
+
+    int k = 1;
+    while (r1 > tolerance * tolerance && k <= limit) {
+        if (k > 1) {
+            bb = r1 / r0;
+            gpuDaxpby(r, p, alpha, bb, N, grid);
+        } else {
+            gpuDcopy(r, p, N, grid);
+        }
+
+        cg::sync(grid);
+
+        gpuSpMV(row, col, val, nz, N, alpha, p, Ax, cta, grid);
+
+        if (threadIdx.x == 0 && blockIdx.x == 0) {
+            *dot_result = 0.0;
+        }
+
+        cg::sync(grid);
+
+        gpuDdot(p, Ax, dot_result, N, cta, grid);
+
+        cg::sync(grid);
+
+        a = r1 / *dot_result;
+
+        gpuDaxpy(p, x_vec, a, N, grid);
+        na = -a;
+        gpuDaxpy(Ax, r, na, N, grid);
+
+        r0 = r1;
+
+        cg::sync(grid);
+        if (threadIdx.x == 0 && blockIdx.x == 0) {
+            *dot_result = 0.0;
+        }
+
+        cg::sync(grid);
+
+        gpuDdot(r, r, dot_result, N, cta, grid);
+
+        cg::sync(grid);
+
+        r1 = *dot_result;
+        k++;
+    }
+
+}
+
+void CG_MBCG(const SymetrixSparseMatrix& A,Vector& x,const Vector& b,double tolerance,int limit,int& iter,double& norm)
+{
+    printf("CG with Multi_Block Cooperative_Groups...\n");
+    auto m_Mat = A.getMat();
+    int num_rows = m_Mat.size(), nz = 0;
+    int N = num_rows;
+    int num_offsets = N + 1;
+
+    int *row, *col;
+    CUDACheck(cudaMallocManaged(reinterpret_cast<void **>(&row), num_offsets * sizeof(int)));
+    row[0] = 0;
+    for (int i = 0; i < m_Mat.size(); i++) {
+		for (int j = 0; j < m_Mat[i].size(); j++) {
+			if (m_Mat[i][j].second != 0.f) {
+				nz++;
+			}
+		}
+        row[i + 1] = nz;
+	}
+	
+    CUDACheck(cudaMallocManaged(reinterpret_cast<void **>(&col), nz * sizeof(int)));
+    double *val, *x_vec, *rhs;
+    CUDACheck(cudaMallocManaged(reinterpret_cast<void **>(&val), nz * sizeof(double)));
+    CUDACheck(cudaMallocManaged(reinterpret_cast<void **>(&x_vec), N * sizeof(double)));
+    CUDACheck(cudaMallocManaged(reinterpret_cast<void **>(&rhs), N * sizeof(double)));
+    // from ellpack to csr
+    int cnt = 0;
+    for (int i = 0; i < m_Mat.size(); i++) {
+		for (int j = 0; j < m_Mat[i].size(); j++) {
+			if (m_Mat[i][j].second != 0.f) {
+				h_col[cnt] = m_Mat[i][j].first;
+                h_val[cnt] = m_Mat[i][j].second;
+                cnt++;
+			}
+		}
+	}
+    auto b_vec = b.generateScalar();
+    for (int i = 0; i < N; i++) {
+        rhs[i] = b_vec[i];
+        x_vec[i] = 0.0;
+    }
+    //--------------------------------------------------------------------------
+    double *r, *p, *Ax;
+    int k;
+    double r1;
+    double *dot_result;
+    cudaEvent_t start, stop;
+    
+    CUDACheck(cudaMallocManaged(reinterpret_cast<void **>(&dot_result), sizeof(double)));
+    *dot_result = 0.0;
+
+    CUDACheck(cudaMallocManaged(reinterpret_cast<void **>(&r), N * sizeof(double)));
+    CUDACheck(cudaMallocManaged(reinterpret_cast<void **>(&p), N * sizeof(double)));
+    CUDACheck(cudaMallocManaged(reinterpret_cast<void **>(&Ax), N * sizeof(double)));
+    
+    cudaDeviceSynchronize();
+
+    CUDACheck(cudaEventCreate(&start));
+    CUDACheck(cudaEventCreate(&stop));
+    
+    cudaDeviceSynchronize();
+
+    for (int i = 0; i < N; i++) {
+        r[i] = rhs[i];
+    }
+
+    void *kernelArgs[] = {
+        (void *)&row, (void *)&col, (void *)&val, (void *)&x_vec, 
+        (void *)&Ax, (void *)&p, (void *)&r, (void *)&dot_result,
+        (void *)&nz, (void *)&N, (void *)&tolerance, (void *)&limit
+    };
+    
+    int sMemSize = sizeof(double) * ((THREADS_PER_BLOCK / 32) + 1);
+    int numBlocksPerSm = 0;
+    int numThreads = THREADS_PER_BLOCK;
+
+    CUDACheck(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+        &numBlocksPerSm, CG_MBCG_kernel, numThreads, sMemSize));
+
+    int numSms = 32;
+    dim3 dimGrid(numSms * numBlocksPerSm, 1, 1), dimBlock(numThreads, 1, 1);
+    
+    CUDACheck(cudaEventRecord(start));
+    CUDACheck(cudaLaunchCooperativeKernel((void *)CG_MBCG_kernel, dimGrid, dimBlock, kernelArgs, sMemSize, NULL));
+    CUDACheck(cudaEventRecord(stop, 0));
+    cudaDeviceSynchronize();
+
+    float time;
+    CUDACheck(cudaEventElapsedTime(&time, start, stop));
+
+    r1 = *dot_result;
+    printf("Final residual = %e, kernel execution time = %f ms\n", std::sqrt(r1), time);
+     
+    std::vector<double> xx(N);
+    for (int i = 0; i < N; i++) {
+        xx[i] = x_vec[i];
+    }
+
+    // save iteration info
+    iter = k;
+    norm = std::sqrt(r1);
+    x.setvalues({xx.begin(), xx.end()});
+
+    
+    CUDACheck(cudaFree(row));
+    CUDACheck(cudaFree(col));
+    CUDACheck(cudaFree(val));
+    CUDACheck(cudaFree(x_vec));
+    CUDACheck(cudaFree(rhs));
+    CUDACheck(cudaFree(r));
+    CUDACheck(cudaFree(p));
+    CUDACheck(cudaFree(Ax));
+    CUDACheck(cudaFree(dot_result));
+    CUDACheck(cudaEventDestroy(start));
+    CUDACheck(cudaEventDestroy(stop));
+
+    return ;
+}
+
+
 void CG_CG(const SymetrixSparseMatrix& A,Vector& x,const Vector& b,double tolerance,int limit,int& iter,double& norm)
 {
     printf("CG with CUDA Graph...\n");
@@ -340,6 +593,166 @@ void CG_CG(const SymetrixSparseMatrix& A,Vector& x,const Vector& b,double tolera
     
     // printf("Test Summary:  Error amount = %f\n", err);
     // exit((k <= limit) ? 0 : 1);
+    return ;
+}
+
+void CG_UM(const SymetrixSparseMatrix& A,Vector& x,const Vector& b,double tolerance,int limit,int& iter,double& norm)
+{
+    printf("CG with Unified Memory...\n");
+    auto m_Mat = A.getMat();
+	int num_rows = m_Mat.size(), nz = 0;
+	int N = num_rows;
+	int num_offsets = N + 1;
+
+    int *row, *col;
+    CUDACheck(cudaMallocManaged(&row, num_offsets * sizeof(int)));
+    row[0] = 0;
+    for (int i = 0; i < m_Mat.size(); i++) {
+		for (int j = 0; j < m_Mat[i].size(); j++) {
+			if (m_Mat[i][j].second != 0.f) {
+				nz++;
+			}
+		}
+        row[i + 1] = nz;
+	}
+	 
+    CUDACheck(cudaMallocManaged(&col, nz * sizeof(int)));
+    double *val, *x_vec, *rhs;
+    CUDACheck(cudaMallocManaged(&val, nz * sizeof(double)));
+    CUDACheck(cudaMallocManaged(&x_vec, N * sizeof(double)));
+    CUDACheck(cudaMallocManaged(&rhs, N * sizeof(double)));
+    // from ellpack to csr
+    int cnt = 0;
+    for (int i = 0; i < m_Mat.size(); i++) {
+		for (int j = 0; j < m_Mat[i].size(); j++) {
+			if (m_Mat[i][j].second != 0.f) {
+				h_col[cnt] = m_Mat[i][j].first;
+                h_val[cnt] = m_Mat[i][j].second;
+                cnt++;
+			}
+		}
+	}
+    auto b_vec = b.generateScalar();
+    for (int i = 0; i < N; i++) {
+        rhs[i] = b_vec[i];
+        x_vec[i] = 0.0;
+    }
+    //--------------------------------------------------------------------------
+    double *r, *p, *Ax;
+    int k;
+    double a, bb, na, r0, r1, dot;
+    double alpha, beta, alpham1;
+    
+    /* Get handle to the CUBLAS context */
+    cublasHandle_t cublasHandle = 0;
+    CUBLASCheck(cublasCreate(&cublasHandle));
+    
+    /* Get handle to the CUSPARSE context */
+    cusparseHandle_t cusparseHandle = 0;
+    CUSPARSECheck(cusparseCreate(&cusparseHandle));
+    
+    CUDACheck(cudaMallocManaged(&r, N * sizeof(double)));
+    CUDACheck(cudaMallocManaged(&p, N * sizeof(double)));
+    CUDACheck(cudaMallocManaged(&Ax, N * sizeof(double)));
+    
+    /* Wrap raw data into cuSPARSE generic API objects */
+    cusparseSpMatDescr_t matA = NULL;
+    CUSPARSECheck(cusparseCreateCsr(&matA, N, N, nz, d_row, d_col, d_val,
+                                        CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I,
+                                        CUSPARSE_INDEX_BASE_ZERO, CUDA_R_64F));
+    cusparseDnVecDescr_t vecx = NULL;
+    CUSPARSECheck(cusparseCreateDnVec(&vecx, N, d_x, CUDA_R_64F));
+    cusparseDnVecDescr_t vecp = NULL;
+    CUSPARSECheck(cusparseCreateDnVec(&vecp, N, d_p, CUDA_R_64F));
+    cusparseDnVecDescr_t vecAx = NULL;
+    CUSPARSECheck(cusparseCreateDnVec(&vecAx, N, d_Ax, CUDA_R_64F));
+    
+    cudaDeviceSynchronize();
+
+    for (int i = 0; i < N; i++) {
+        r[i] = rhs[i];
+    }
+
+    alpha = 1.0;
+    alpham1 = -1.0;
+    beta = 0.0;
+    r0 = 0.0;
+    /* Allocate workspace for cuSPARSE */
+    size_t bufferSize = 0;
+    CUSPARSECheck(cusparseSpMV_bufferSize(
+        cusparseHandle, CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha, matA, vecx,
+        &beta, vecAx, CUDA_R_64F, CUSPARSE_SPMV_ALG_DEFAULT, &bufferSize));
+    void *buffer = NULL; 
+    CUDACheck(cudaMalloc(&buffer, bufferSize));
+    
+    CUSPARSECheck(cusparseSpMV(cusparseHandle, CUSPARSE_OPERATION_NON_TRANSPOSE,
+                                    &alpha, matA, vecx, &beta, vecAx, CUDA_R_64F,
+                                    CUSPARSE_SPMV_ALG_DEFAULT, buffer));
+    CUBLASCheck(cublasDaxpy(cublasHandle, N, &alpham1, Ax, 1, r, 1));
+    CUBLASCheck(cublasDdot(cublasHandle, N, r, 1, r, 1, &r1));
+    
+    k = 1;
+    while (r1 > tolerance * tolerance && k <= limit) {
+        if (k > 1) {
+            bb = r1 / r0;
+            CUBLASCheck(cublasDscal(cublasHandle, N, &bb, p, 1));
+            CUBLASCheck(cublasDaxpy(cublasHandle, N, &alpha, r, 1, p, 1));
+        } else {
+            CUBLASCheck(cublasDcopy(cublasHandle, N, r, 1, p, 1));
+        }
+
+        CUSPARSECheck(cusparseSpMV(cusparseHandle, 
+            CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha, matA, vecp, &beta, vecAx, 
+            CUDA_R_64F, CUSPARSE_SPMV_ALG_DEFAULT, buffer));
+        CUBLASCheck(cublasDdot(cublasHandle, N, p, 1, Ax, 1, &dot));
+        a = r1 / dot;
+
+        CUBLASCheck(cublasDaxpy(cublasHandle, N, &a, p, 1, x_vec, 1));
+        na = -a;
+        CUBLASCheck(cublasDaxpy(cublasHandle, N, &na, Ax, 1, r, 1));
+
+        r0 = r1;
+        CUBLASCheck(cublasDdot(cublasHandle, N, r, 1, r, 1, &r1));
+        cudaDeviceSynchronize();
+        
+        k++;
+    }
+     
+    std::vector<double> xx(N);
+    for (int i = 0; i < N; i++) {
+        xx[i] = x_vec[i];
+    }
+
+    // save iteration info
+    iter = k;
+    norm = std::sqrt(r1);
+    x.setvalues({xx.begin(), xx.end()});
+
+    cusparseDestroy(cusparseHandle);
+    cublasDestroy(cublasHandle);
+    
+    if (matA) {
+        CUSPARSECheck(cusparseDestroySpMat(matA));
+    }
+    if (vecx) {
+        CUSPARSECheck(cusparseDestroyDnVec(vecx));
+    }
+    if (vecAx) {
+        CUSPARSECheck(cusparseDestroyDnVec(vecAx));
+    }
+    if (vecp) {
+        CUSPARSECheck(cusparseDestroyDnVec(vecp));
+    }
+    
+    CUDACheck(cudaFree(row));
+    CUDACheck(cudaFree(col));
+    CUDACheck(cudaFree(val));
+    CUDACheck(cudaFree(x_vec));
+    CUDACheck(cudaFree(rhs));
+    CUDACheck(cudaFree(r));
+    CUDACheck(cudaFree(p));
+    CUDACheck(cudaFree(Ax));
+
     return ;
 }
 

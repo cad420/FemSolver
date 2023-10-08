@@ -11,7 +11,14 @@
 #include<thrust/sort.h>
 #include<thrust/execution_policy.h>
 
+#include<cooperative_groups.h>
+#include<cooperative_groups/reduce.h>
+
 #include "../Math/Solver.hpp"
+
+namespace cg = cooperative_groups;
+
+#define THREADS_PER_BLOCK 512
 
 #ifndef WITH_GRAPH
 #define WITH_GRAPH 1
