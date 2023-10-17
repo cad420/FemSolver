@@ -5,7 +5,10 @@ extern void CG(const SymetrixSparseMatrix& A,Vector& x,const Vector& b,double to
 extern void PCG_ICC(const SymetrixSparseMatrix& A,Vector& x,const Vector& b,double tolerance,int limit,int& iter,double& norm);
 // extern void PCG_SSOR(const SymetrixSparseMatrix& A,Vector& x,const Vector& b,double tolerance,int limit,int& iter,double& norm);
 extern void BiCGSTAB(const SymetrixSparseMatrix& A,Vector& x,const Vector& b,double tolerance,int limit,int& iter,double& norm);
-// extern void CG_CG(const SymetrixSparseMatrix& A,Vector& x,const Vector& b,double tolerance,int limit,int& iter,double& norm);
+extern void CG_CG(const SymetrixSparseMatrix& A,Vector& x,const Vector& b,double tolerance,int limit,int& iter,double& norm);
+extern void CG_UM(const SymetrixSparseMatrix& A,Vector& x,const Vector& b,double tolerance,int limit,int& iter,double& norm);
+extern void CG_MBCG(const SymetrixSparseMatrix& A,Vector& x,const Vector& b,double tolerance,int limit,int& iter,double& norm);
+extern void CG_MGCG(const SymetrixSparseMatrix& A,Vector& x,const Vector& b,double tolerance,int limit,int& iter,double& norm);
 
 Solver::Solver()
         :iteration_set(1000),iteration_close(0),ResdualNorm(0),tolerance(1e-9)
@@ -18,12 +21,14 @@ Solver::~Solver()
 
 void Solver::Solve(const SymetrixSparseMatrix& A,Vector& x,const Vector& b)
 {
-    CG(A,x,b,tolerance,iteration_set,iteration_close,ResdualNorm);
+    // CG(A,x,b,tolerance,iteration_set,iteration_close,ResdualNorm);
     // PCG_SSOR(A,x,b,tolerance,iteration_set,iteration_close,ResdualNorm);
     // PCG_ICC(A,x,b,tolerance,iteration_set,iteration_close,ResdualNorm);
     
    // BiCGSTAB(A,x,b,tolerance,iteration_set,iteration_close,ResdualNorm);
     // CG_CG(A,x,b,tolerance,iteration_set,iteration_close,ResdualNorm);
+    // CG_UM(A,x,b,tolerance,iteration_set,iteration_close,ResdualNorm);
+    CG_MBCG(A,x,b,tolerance,iteration_set,iteration_close,ResdualNorm);
 }
 
 void Solver::setMaxIteration(idxType iter)

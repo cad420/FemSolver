@@ -1,5 +1,6 @@
 #include "CG.cuh"
 
+__device__ double grid_dot_result = 0.0;
 
 __global__ void r1_div_x(double *r1, double *r0, double *b) {
     int gid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -15,7 +16,7 @@ __global__ void a_minus(double *a, double *na) {
     }
 }
 
-__device__ void gpuSpMV(int *row, int *col, double *val, int nz, int N, double alpha, double *x_vec, double *Ax, cg::thread_block &cta, const cg::grid_group &grid)
+__device__ void gpuSpMV(int *row, int *col, double *val, int nz, int N, double alpha, double *inputVecX, double *outputVecY, cg::thread_block &cta, const cg::grid_group &grid)
 {
     for (int i = grid.thread_rank(); i < N; i += grid.size()) {
         int row_elem = row[i];
@@ -24,16 +25,16 @@ __device__ void gpuSpMV(int *row, int *col, double *val, int nz, int N, double a
 
         double output = 0.0;
         for (int j = 0; j < num_elems_this_row; j++) {
-            output += alpha * val[row_elem + j] * x_vec[col[row_elem + j]];
+            output += alpha * val[row_elem + j] * inputVecX[col[row_elem + j]];
         }
-        Ax[i] = output;
+        outputVecY[i] = output;
     }
 }
 
 __device__ void gpuDaxpy(double *x, double *y, double a, int size, const cg::grid_group &grid)
 {
     for (int i = grid.thread_rank(); i < size; i += grid.size()) {
-        y[i] += a * x[i] + y[i];
+        y[i] = a * x[i] + y[i];
     }
 }
 
@@ -80,7 +81,476 @@ __device__ void gpuDdot(double *x, double *y, double *result, int size, const cg
     }
 }
 
-extern "C" __global void CG_MBCG_kernel(int *row, int *col, double *val, double *x_vec, double *Ax, double *p, double *r, double *dot_result, int nz, int N, double tolerance, int limit)
+__device__ void multiGpuSpMV(int *row, int *col, double *val, int nz, int N, double alpha, double *inputVecX, double *outputVecY, const PeerGroup &peer_group)
+{
+    for (int i = peer_group.thread_rank(); i < N; i += peer_group.size()) {
+        int row_elem = row[i];
+        int next_row_elem = row[i + 1];
+        int num_elems_this_row = next_row_elem - row_elem;
+        
+        double output = 0.0;
+        for (int j = 0; j < num_elems_this_row; j++) {
+            output += alpha * val[row_elem + j] * inputVecX[col[row_elem + j]];
+        }
+
+        outputVecY[i] = output;
+    }
+}
+
+__device__ void multiGpuDaxpy(double *x, double *y, double a, int size, const PeerGroup &peer_group)
+{
+    for (int i = peer_group.thread_rank(); i < size; i += peer_group.size()) {
+        y[i] = a * x[i] + y[i];
+    }
+}
+
+__device__ void multiGpuDcopy(double *x, double *y, int size, const PeerGroup &peer_group)
+{
+    for (int i = peer_group.thread_rank(); i < size; i += peer_group.size()) {
+        y[i] = x[i];
+    }
+}
+
+__device__ void multiGpuDaxpby(double *x, double *y, double a, double b, int size, const PeerGroup &peer_group)
+{
+    for (int i = peer_group.thread_rank(); i < size; i += peer_group.size()) {
+        y[i] = a * x[i] + b * y[i];
+    }
+}
+
+__device__ void multiGpuDdot(double *x, double *y, int size, const cg::thread_block &cta, const PeerGroup &peer_group)
+{
+    extern __shared__ double tmp[];
+
+    double temp_sum = 0.0;
+
+    for (int i = peer_group.thread_rank(); i < size; i += peer_group.size()) {
+        temp_sum += (double)(x[i] * y[i]);
+    }
+
+    cg::thread_block_tile<32> tile32 = cg::tiled_partition<32>(cta);
+
+    temp_sum = cg::reduce(tile32, temp_sum, cg::plus<double>());
+
+    if (tile32.thread_rank() == 0) {
+        tmp[tile32.meta_group_rank()] = temp_sum;
+    }
+
+    cg::sync(cta);
+
+    if (tile32.meta_group_rank() == 0) {
+        temp_sum = tile32.thread_rank() < tile32.meta_group_size() ? tmp[tile32.thread_rank()] : 0.0;
+        temp_sum = cg::reduce(tile32, temp_sum, cg::plus<double>());
+
+        if (tile32.thread_rank() == 0) {
+            atomicAdd(&grid_dot_result, temp_sum);
+        }
+    }
+}
+
+extern "C" __global__ void CG_MGCG_kernel(int *row, int *col, double *val, double *x_vec, double *Ax, double *p, double *r, double *dot_result, int nz, int N, double tolerance, int limit, int *k, MultiDeviceData multi_device_data)
+{
+    cg::thread_block cta = cg::this_thread_block();
+    cg::grid_group grid = cg::this_grid();
+    PeerGroup peer_group(multi_device_data, grid);
+
+    double alpha = 1.0;
+    double alpham1 = -1.0;
+    double r0 = 0.0, r1, bb, a, na;
+
+    multiGpuSpMV(row, col, val, nz, N, alpha, x_vec, Ax, peer_group);
+    cg::sync(grid);
+
+    multiGpuDaxpy(Ax, r, alpham1, N, peer_group);
+    cg::sync(grid);
+
+    multiGpuDdot(r, r, N, cta, peer_group);
+    cg::sync(grid);
+
+    if (grid.thread_rank() == 0) {
+        atomicAdd_system(dot_result, grid_dot_result);
+        grid_dot_result = 0.0;
+    }
+    peer_group.sync();
+
+    r1 = *dot_result;
+
+    int kk = 1;
+    while (r1 > tolerance * tolerance && kk <= limit) {
+        if (kk > 1) {
+            bb = r1 / r0;
+            multiGpuDaxpby(r, p, alpha, bb, N, peer_group);
+        } else {
+            multiGpuDcopy(r, p, N, peer_group);
+        }
+
+        peer_group.sync();
+
+        multiGpuSpMV(row, col, val, nz, N, alpha, p, Ax, peer_group);
+
+        if (peer_group.thread_rank() == 0) {
+            *dot_result = 0.0;
+        }
+        peer_group.sync();
+
+        multiGpuDdot(p, Ax, N, cta, peer_group);
+        cg::sync(grid);
+
+        if (grid.thread_rank() == 0) {
+            atomicAdd_system(dot_result, grid_dot_result);
+            grid_dot_result = 0.0;
+        }
+        peer_group.sync();
+
+        a = r1 / *dot_result;
+        multiGpuDaxpy(p, x_vec, a, N, peer_group);
+
+        na = -a;
+        multiGpuDaxpy(Ax, r, na, N, peer_group);
+
+        r0 = r1;
+        peer_group.sync();
+
+        if (peer_group.thread_rank() == 0) {
+            *dot_result = 0.0;
+        }
+
+        peer_group.sync();
+
+        multiGpuDdot(r, r, N, cta, peer_group);
+        cg::sync(grid);
+
+        if (grid.thread_rank() == 0) {
+            atomicAdd_system(dot_result, grid_dot_result);
+            grid_dot_result = 0.0;
+        }
+        peer_group.sync();
+
+        r1 = *dot_result;
+        kk++;
+    }
+    *k = kk;
+}
+
+std::multimap<std::pair<int, int>, int> getIdenticalGPUs()
+{
+    int numGpus = 0;
+    CUDACheck(cudaGetDeviceCount(&numGpus));
+
+    std::multimap<std::pair<int, int>, int> identicalGpus;
+
+    for (int i = 0; i < numGpus; i++) {
+        cudaDeviceProp deviceProp;
+        CUDACheck(cudaGetDeviceProperties(&deviceProp, i));
+
+        // Filter unsupported devices
+        if (deviceProp.cooperativeLaunch && deviceProp.concurrentManagedAccess) {
+            identicalGpus.emplace(std::make_pair(deviceProp.major, deviceProp.minor), i);
+        }
+        printf("GPU Device %d: \"%s\" with compute capability %d.%d\n", i, deviceProp.name, deviceProp.major, deviceProp.minor);
+    }
+
+    return identicalGpus;
+}
+
+void CG_MGCG(const SymetrixSparseMatrix& A,Vector& x,const Vector& b,double tolerance,int limit,int& iter,double& norm)
+{
+    printf("CG with Multi_GPUs Cooperative_Groups...\n");
+    constexpr size_t kNumGpusRequired = 2;
+    auto m_Mat = A.getMat();
+    int num_rows = m_Mat.size(), nz = 0;
+    int N = num_rows;
+    int num_offsets = N + 1;
+
+    auto gpusByArch = getIdenticalGPUs();
+
+    auto it = gpusByArch.begin();
+    auto end = gpusByArch.end();
+
+    auto bestFit = std::make_pair(it, it);
+    auto distance = [](decltype(bestFit) p) {
+        return std::distance(p.first, p.second);
+    };
+
+    // Read each unique key/pair element in order
+    for (; it != end; it = gpusByArch.upper_bound(it->first)) {
+        // first and second are iterators bounded within the architecture group
+        auto testFit = gpusByArch.equal_range(it->first);
+        // Always use devices with highest architecture version or whichever has the most devices available
+        if (distance(bestFit) <= distance(testFit)) {
+            bestFit = testFit;
+        }
+    }
+
+    if (distance(bestFit) < kNumGpusRequired) {
+        printf("No two or more GPUs with same architecture capable of cooperative launch found.\n");
+        exit(EXIT_WAIVED);
+    }
+
+    std::set<int> bestFitDeviceIds;
+
+    // Check & select peer-to-peer access capable GPU devices as enabling p2p access between participating GPUs gives better performance.
+    for (auto itr = bestFit.first; itr != bestFit.second; itr++) {
+        int deviceId = itr->second;
+        CUDACheck(cudaSetDevice(deviceId));
+
+        std::for_each(
+            itr, bestFit.second,
+            [&deviceId, &bestFitDeviceIds, &kNumGpusRequired](decltype(*itr) mapPair) {
+                if (deviceId != mapPair.second) {
+                    int access = 0;
+                    CUDACheck(cudaDeviceCanAccessPeer(&access, deviceId, mapPair.second));
+                    printf("Device = %d %s Access Peer Device = %d\n", deviceId, access ? "CAN" : "CANNOT", mapPair.second);
+                    if (access && bestFitDeviceIds.size() < kNumGpusRequired) {
+                        bestFitDeviceIds.emplace(deviceId);
+                        bestFitDeviceIds.emplace(mapPair.second);
+                    } else {
+                        printf("Ignoring device %i (max devices exceeded)\n", mapPair.second);
+                    }
+                }
+            }
+        );
+
+        if (bestFitDeviceIds.size() >= kNumGpusRequired) {
+            printf("Selected p2p capable devices - ");
+            for (auto devicesItr = bestFitDeviceIds.begin(); devicesItr != bestFitDeviceIds.end(); devicesItr++) {
+                printf("devicesId = %d  ", *devicesItr);
+            }
+            printf("\n");
+            break;
+        }
+    }
+
+    // if bestFitDeviceIds.size() == 0 it means the GPUs in system are not p2p capable, hence we add it without p2p capability check.
+    if (!bestFitDeviceIds.size()) {
+        printf("Devices involved are not p2p capable.. selecting %zu of them\n", kNumGpusRequired);
+        std::for_each(
+            bestFit.first, bestFit.second, 
+            [&bestFitDeviceIds, &kNumGpusRequired](decltype(*bestFit.first) mapPair) {
+                if (bestFitDeviceIds.size() < kNumGpusRequired) {
+                    bestFitDeviceIds.emplace(mapPair.second);
+                } else {
+                    printf("Ignoring device %i (max devices exceeded)\n", mapPair.second);
+                }
+            }
+        );
+    } else {
+        // perform cudaDeviceEnablePeerAccess in both directions for all participating devices.
+        for (auto p1_itr = bestFitDeviceIds.begin(); p1_itr != bestFitDeviceIds.end(); p1_itr++) {
+            CUDACheck(cudaSetDevice(*p1_itr));
+            for (auto p2_itr = bestFitDeviceIds.begin(); p2_itr != bestFitDeviceIds.end(); p2_itr++) {
+                if (*p1_itr != *p2_itr) {
+                    CUDACheck(cudaDeviceEnablePeerAccess(*p2_itr, 0));
+                    CUDACheck(cudaSetDevice(*p1_itr));
+                }
+            }    
+        }
+    }
+
+    int *row, *col;
+    CUDACheck(cudaMallocManaged(reinterpret_cast<void **>(&row), num_offsets * sizeof(int)));
+    row[0] = 0;
+    for (int i = 0; i < m_Mat.size(); i++) {
+		for (int j = 0; j < m_Mat[i].size(); j++) {
+			if (m_Mat[i][j].second != 0.f) {
+				nz++;
+			}
+		}
+        row[i + 1] = nz;
+	}
+	
+    CUDACheck(cudaMallocManaged(reinterpret_cast<void **>(&col), nz * sizeof(int)));
+    double *val, *x_vec, *rhs;
+    CUDACheck(cudaMallocManaged(reinterpret_cast<void **>(&val), nz * sizeof(double)));
+    CUDACheck(cudaMallocManaged(reinterpret_cast<void **>(&x_vec), N * sizeof(double)));
+    CUDACheck(cudaMallocManaged(reinterpret_cast<void **>(&rhs), N * sizeof(double)));
+    // from ellpack to csr
+    int cnt = 0;
+    for (int i = 0; i < m_Mat.size(); i++) {
+		for (int j = 0; j < m_Mat[i].size(); j++) {
+			if (m_Mat[i][j].second != 0.f) {
+				col[cnt] = m_Mat[i][j].first;
+                val[cnt] = m_Mat[i][j].second;
+                cnt++;
+			}
+		}
+	}
+
+    CUDACheck(cudaMemAdvise(row, num_offsets * sizeof(int), cudaMemAdviseSetReadMostly, 0));
+    CUDACheck(cudaMemAdvise(col, nz * sizeof(int), cudaMemAdviseSetReadMostly, 0));
+    CUDACheck(cudaMemAdvise(val, nz * sizeof(double), cudaMemAdviseSetReadMostly, 0));
+
+    auto b_vec = b.generateScalar();
+    for (int i = 0; i < N; i++) {
+        rhs[i] = b_vec[i];
+        x_vec[i] = 0.0;
+    }
+    //--------------------------------------------------------------------------
+    double *r, *p, *Ax;
+    int *k;
+    double r1;
+    double *dot_result;
+    cudaEvent_t start, stop;
+    
+    CUDACheck(cudaMallocManaged(reinterpret_cast<void **>(&k), sizeof(int)));
+    CUDACheck(cudaMallocManaged(reinterpret_cast<void **>(&dot_result), sizeof(double)));
+    *k = 0;
+    *dot_result = 0.0;
+
+    CUDACheck(cudaMallocManaged(reinterpret_cast<void **>(&r), N * sizeof(double)));
+    CUDACheck(cudaMallocManaged(reinterpret_cast<void **>(&p), N * sizeof(double)));
+    CUDACheck(cudaMallocManaged(reinterpret_cast<void **>(&Ax), N * sizeof(double)));
+    
+    printf("Running on GPUs = %d\n", kNumGpusRequired);
+    cudaStream_t nStreams[kNumGpusRequired];
+
+    for (int i = 0; i < N; i++) {
+        r[i] = rhs[i];
+    }
+    
+    int sMemSize = sizeof(double) * ((THREADS_PER_BLOCK / 32) + 1);
+    int numBlocksPerSm = INT_MAX;
+    int numThreads = THREADS_PER_BLOCK;
+    int numSms = INT_MAX;
+    auto deviceId = bestFitDeviceIds.begin();
+
+    // set numSms & numBlocksPerSm to be lowest of 2 devices
+    while (deviceId != bestFitDeviceIds.end()) {
+        cudaDeviceProp deviceProp;
+        CUDACheck(cudaSetDevice(*deviceId))
+        CUDACheck(cudaGetDeviceProperties(&deviceProp, *deviceId));
+        
+        int numBlocksPerSmTemp = 0;
+        CUDACheck(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&numBlocksPerSmTemp, CG_MGCG_kernel, numThreads, sMemSize));
+
+        if (numBlocksPerSm > numBlocksPerSmTemp) {
+            numBlocksPerSm = numBlocksPerSmTemp;
+        }
+        if (numSms > deviceProp.multiProcessorCount) {
+            numSms = deviceProp.multiProcessorCount;
+        }
+        deviceId++;
+    }
+
+    if (!numBlocksPerSm) {
+        printf("Max active blocks per SM is returned as 0. Hence, Waving the sample\n");
+        exit(EXIT_WAIVED);
+    }
+
+    int device_count = 0;
+    int totalThreadsPerGPU = numSms * numBlocksPerSm * THREADS_PER_BLOCK;
+    deviceId = bestFitDeviceIds.begin();
+    while (deviceId != bestFitDeviceIds.end()) {
+        CUDACheck(cudaSetDevice(*deviceId));
+        CUDACheck(cudaStreamCreate(&nStreams[device_count]));
+
+        int perGPUIter = N / (totalThreadsPerGPU * kNumGpusRequired);
+        int offset_Ax = device_count * totalThreadsPerGPU;
+        int offset_r = device_count * totalThreadsPerGPU;
+        int offset_p = device_count * totalThreadsPerGPU;
+        int offset_x = device_count * totalThreadsPerGPU;
+
+        CUDACheck(cudaMemPrefetchAsync(row, N * sizeof(int), *deviceId, nStreams[device_count]));
+        CUDACheck(cudaMemPrefetchAsync(col, nz * sizeof(int), *deviceId, nStreams[device_count]));
+        CUDACheck(cudaMemPrefetchAsync(val, nz * sizeof(double), *deviceId, nStreams[device_count]));
+
+        if (offset_Ax <= N) {
+            for (int i = 0; i < perGPUIter; i++) {
+                CUDACheck(cudaMemAdvise(Ax + offset_Ax, totalThreadsPerGPU * sizeof(double), cudaMemAdviseSetPreferredLocation, *deviceId));
+                CUDACheck(cudaMemAdvise(r + offset_r, totalThreadsPerGPU * sizeof(double), cudaMemAdviseSetPreferredLocation, *deviceId));
+                CUDACheck(cudaMemAdvise(p + offset_p, totalThreadsPerGPU * sizeof(double), cudaMemAdviseSetPreferredLocation, *deviceId));
+                CUDACheck(cudaMemAdvise(x_vec + offset_x, totalThreadsPerGPU * sizeof(double), cudaMemAdviseSetPreferredLocation, *deviceId));
+
+                CUDACheck(cudaMemAdvise(Ax + offset_Ax, totalThreadsPerGPU * sizeof(double), cudaMemAdviseSetAccessedBy, *deviceId));
+                CUDACheck(cudaMemAdvise(r + offset_r, totalThreadsPerGPU * sizeof(double), cudaMemAdviseSetAccessedBy, *deviceId));
+                CUDACheck(cudaMemAdvise(p + offset_p, totalThreadsPerGPU * sizeof(double), cudaMemAdviseSetAccessedBy, *deviceId));
+                CUDACheck(cudaMemAdvise(x_vec + offset_x, totalThreadsPerGPU * sizeof(double), cudaMemAdviseSetAccessedBy, *deviceId));
+
+                offset_Ax += totalThreadsPerGPU * kNumGpusRequired;
+                offset_r += totalThreadsPerGPU * kNumGpusRequired;
+                offset_p += totalThreadsPerGPU * kNumGpusRequired;
+                offset_x += totalThreadsPerGPU * kNumGpusRequired;
+
+                if (offset_Ax >= N) {
+                    break;
+                }
+            }
+        }
+
+        device_count++;
+        deviceId++;
+    }
+
+    printf("Total threads per GPU = %d numBlocksPerSm = %d\n", numSms * numBlocksPerSm * THREADS_PER_BLOCK, numBlocksPerSm);
+    dim3 dimGrid(numSms * numBlocksPerSm, 1, 1), dimBlock(numThreads, 1, 1);
+
+    MultiDeviceData multi_device_data;
+    CUDACheck(cudaHostAlloc(&multi_device_data.hostMemoryArrivedList, (kNumGpusRequired - 1) * sizeof(*multi_device_data.hostMemoryArrivedList), cudaHostAllocPortable));
+    memset(multi_device_data.hostMemoryArrivedList, 0, (kNumGpusRequired - 1) * sizeof(*multi_device_data.hostMemoryArrivedList));
+    multi_device_data.numDevices = kNumGpusRequired;
+    multi_device_data.deviceRank = 0;
+    
+    void *kernelArgs[] = {
+        (void *)&row, (void *)&col, (void *)&val, (void *)&x_vec,
+        (void *)&Ax, (void *)&p, (void *)&r, (void *)&dot_result,
+        (void *)&nz, (void *)&N, (void *)&tolerance, (void *)&limit,
+        (void *)&k, (void *)&multi_device_data
+    };
+
+    printf("Launching kernel\n");
+
+    deviceId = bestFitDeviceIds.begin();
+    device_count = 0;
+
+    while (deviceId != bestFitDeviceIds.end()) {
+        CUDACheck(cudaSetDevice(*deviceId));
+        CUDACheck(cudaLaunchCooperativeKernel((void *)CG_MGCG_kernel, dimGrid, dimBlock, kernelArgs, sMemSize, nStreams[device_count]));
+        device_count++;
+        multi_device_data.deviceRank++;
+        deviceId++;
+    }
+    
+    CUDACheck(cudaMemPrefetchAsync(x_vec, N * sizeof(double), cudaCpuDeviceId));
+    CUDACheck(cudaMemPrefetchAsync(dot_result, N * sizeof(double), cudaCpuDeviceId));
+
+    deviceId = bestFitDeviceIds.begin();
+    device_count = 0;
+    while (deviceId != bestFitDeviceIds.end()) {
+        CUDACheck(cudaSetDevice(*deviceId));
+        CUDACheck(cudaStreamSynchronize(nStreams[device_count]));
+        device_count++;
+        deviceId++;
+    }
+
+    r1 = *dot_result;
+    printf("Final residual = %e\n", std::sqrt(r1));
+     
+    std::vector<double> xx(N);
+    for (int i = 0; i < N; i++) {
+        xx[i] = x_vec[i];
+    }
+
+    // save iteration info
+    iter = *k;
+    norm = std::sqrt(r1);
+    x.setvalues({xx.begin(), xx.end()});
+
+    CUDACheck(cudaFreeHost(multi_device_data.hostMemoryArrivedList));
+    CUDACheck(cudaFree(row));
+    CUDACheck(cudaFree(col));
+    CUDACheck(cudaFree(val));
+    CUDACheck(cudaFree(x_vec));
+    CUDACheck(cudaFree(rhs));
+    CUDACheck(cudaFree(r));
+    CUDACheck(cudaFree(p));
+    CUDACheck(cudaFree(Ax));
+    CUDACheck(cudaFree(dot_result));
+    CUDACheck(cudaFree(k));
+    
+    return ;
+}
+
+extern "C" __global__ void CG_MBCG_kernel(int *row, int *col, double *val, double *x_vec, double *Ax, double *p, double *r, double *dot_result, int nz, int N, double tolerance, int limit, int *k)
 {
     cg::thread_block cta = cg::this_thread_block();
     cg::grid_group grid = cg::this_grid();
@@ -100,9 +570,9 @@ extern "C" __global void CG_MBCG_kernel(int *row, int *col, double *val, double 
 
     r1 = *dot_result;
 
-    int k = 1;
-    while (r1 > tolerance * tolerance && k <= limit) {
-        if (k > 1) {
+    int kk = 1;
+    while (r1 > tolerance * tolerance && kk <= limit) {
+        if (kk > 1) {
             bb = r1 / r0;
             gpuDaxpby(r, p, alpha, bb, N, grid);
         } else {
@@ -143,9 +613,10 @@ extern "C" __global void CG_MBCG_kernel(int *row, int *col, double *val, double 
         cg::sync(grid);
 
         r1 = *dot_result;
-        k++;
+        kk++;
+        // if (kk > 29) break;
     }
-
+    *k = kk;
 }
 
 void CG_MBCG(const SymetrixSparseMatrix& A,Vector& x,const Vector& b,double tolerance,int limit,int& iter,double& norm)
@@ -156,6 +627,8 @@ void CG_MBCG(const SymetrixSparseMatrix& A,Vector& x,const Vector& b,double tole
     int N = num_rows;
     int num_offsets = N + 1;
 
+    cudaDeviceProp deviceProp;
+    CUDACheck(cudaGetDeviceProperties(&deviceProp, 0));
     int *row, *col;
     CUDACheck(cudaMallocManaged(reinterpret_cast<void **>(&row), num_offsets * sizeof(int)));
     row[0] = 0;
@@ -178,8 +651,8 @@ void CG_MBCG(const SymetrixSparseMatrix& A,Vector& x,const Vector& b,double tole
     for (int i = 0; i < m_Mat.size(); i++) {
 		for (int j = 0; j < m_Mat[i].size(); j++) {
 			if (m_Mat[i][j].second != 0.f) {
-				h_col[cnt] = m_Mat[i][j].first;
-                h_val[cnt] = m_Mat[i][j].second;
+				col[cnt] = m_Mat[i][j].first;
+                val[cnt] = m_Mat[i][j].second;
                 cnt++;
 			}
 		}
@@ -191,12 +664,14 @@ void CG_MBCG(const SymetrixSparseMatrix& A,Vector& x,const Vector& b,double tole
     }
     //--------------------------------------------------------------------------
     double *r, *p, *Ax;
-    int k;
+    int *k;
     double r1;
     double *dot_result;
     cudaEvent_t start, stop;
     
+    CUDACheck(cudaMallocManaged(reinterpret_cast<void **>(&k), sizeof(int)));
     CUDACheck(cudaMallocManaged(reinterpret_cast<void **>(&dot_result), sizeof(double)));
+    *k = 0;
     *dot_result = 0.0;
 
     CUDACheck(cudaMallocManaged(reinterpret_cast<void **>(&r), N * sizeof(double)));
@@ -208,8 +683,6 @@ void CG_MBCG(const SymetrixSparseMatrix& A,Vector& x,const Vector& b,double tole
     CUDACheck(cudaEventCreate(&start));
     CUDACheck(cudaEventCreate(&stop));
     
-    cudaDeviceSynchronize();
-
     for (int i = 0; i < N; i++) {
         r[i] = rhs[i];
     }
@@ -217,7 +690,8 @@ void CG_MBCG(const SymetrixSparseMatrix& A,Vector& x,const Vector& b,double tole
     void *kernelArgs[] = {
         (void *)&row, (void *)&col, (void *)&val, (void *)&x_vec, 
         (void *)&Ax, (void *)&p, (void *)&r, (void *)&dot_result,
-        (void *)&nz, (void *)&N, (void *)&tolerance, (void *)&limit
+        (void *)&nz, (void *)&N, (void *)&tolerance, (void *)&limit,
+        (void *)&k
     };
     
     int sMemSize = sizeof(double) * ((THREADS_PER_BLOCK / 32) + 1);
@@ -227,11 +701,12 @@ void CG_MBCG(const SymetrixSparseMatrix& A,Vector& x,const Vector& b,double tole
     CUDACheck(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
         &numBlocksPerSm, CG_MBCG_kernel, numThreads, sMemSize));
 
-    int numSms = 32;
+    int numSms = deviceProp.multiProcessorCount;
     dim3 dimGrid(numSms * numBlocksPerSm, 1, 1), dimBlock(numThreads, 1, 1);
     
-    CUDACheck(cudaEventRecord(start));
+    CUDACheck(cudaEventRecord(start, 0));
     CUDACheck(cudaLaunchCooperativeKernel((void *)CG_MBCG_kernel, dimGrid, dimBlock, kernelArgs, sMemSize, NULL));
+    // cudaLaunchCooperativeKernel((void *)CG_MBCG_kernel, dimGrid, dimBlock, kernelArgs, sMemSize, NULL);
     CUDACheck(cudaEventRecord(stop, 0));
     cudaDeviceSynchronize();
 
@@ -247,7 +722,7 @@ void CG_MBCG(const SymetrixSparseMatrix& A,Vector& x,const Vector& b,double tole
     }
 
     // save iteration info
-    iter = k;
+    iter = *k;
     norm = std::sqrt(r1);
     x.setvalues({xx.begin(), xx.end()});
 
@@ -261,6 +736,7 @@ void CG_MBCG(const SymetrixSparseMatrix& A,Vector& x,const Vector& b,double tole
     CUDACheck(cudaFree(p));
     CUDACheck(cudaFree(Ax));
     CUDACheck(cudaFree(dot_result));
+    CUDACheck(cudaFree(k));
     CUDACheck(cudaEventDestroy(start));
     CUDACheck(cudaEventDestroy(stop));
 
@@ -626,8 +1102,8 @@ void CG_UM(const SymetrixSparseMatrix& A,Vector& x,const Vector& b,double tolera
     for (int i = 0; i < m_Mat.size(); i++) {
 		for (int j = 0; j < m_Mat[i].size(); j++) {
 			if (m_Mat[i][j].second != 0.f) {
-				h_col[cnt] = m_Mat[i][j].first;
-                h_val[cnt] = m_Mat[i][j].second;
+				col[cnt] = m_Mat[i][j].first;
+                val[cnt] = m_Mat[i][j].second;
                 cnt++;
 			}
 		}
@@ -657,15 +1133,15 @@ void CG_UM(const SymetrixSparseMatrix& A,Vector& x,const Vector& b,double tolera
     
     /* Wrap raw data into cuSPARSE generic API objects */
     cusparseSpMatDescr_t matA = NULL;
-    CUSPARSECheck(cusparseCreateCsr(&matA, N, N, nz, d_row, d_col, d_val,
+    CUSPARSECheck(cusparseCreateCsr(&matA, N, N, nz, row, col, val,
                                         CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I,
                                         CUSPARSE_INDEX_BASE_ZERO, CUDA_R_64F));
     cusparseDnVecDescr_t vecx = NULL;
-    CUSPARSECheck(cusparseCreateDnVec(&vecx, N, d_x, CUDA_R_64F));
+    CUSPARSECheck(cusparseCreateDnVec(&vecx, N, x_vec, CUDA_R_64F));
     cusparseDnVecDescr_t vecp = NULL;
-    CUSPARSECheck(cusparseCreateDnVec(&vecp, N, d_p, CUDA_R_64F));
+    CUSPARSECheck(cusparseCreateDnVec(&vecp, N, p, CUDA_R_64F));
     cusparseDnVecDescr_t vecAx = NULL;
-    CUSPARSECheck(cusparseCreateDnVec(&vecAx, N, d_Ax, CUDA_R_64F));
+    CUSPARSECheck(cusparseCreateDnVec(&vecAx, N, Ax, CUDA_R_64F));
     
     cudaDeviceSynchronize();
 
