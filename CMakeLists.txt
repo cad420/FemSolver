@@ -1,0 +1,38 @@
+cmake_minimum_required(VERSION 3.10)
+
+project(femsolver LANGUAGES C CXX CUDA)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED True)
+
+# if(MSVC)
+#     add_definitions(-D_CRT_SECURE_NO_WARNINGS)
+# endif()
+add_subdirectory(cudaCore)
+include_directories(cudaCore)
+
+file(GLOB SOURCES ./*.cpp ./Math/*.cpp)
+
+# message(${SOURCES}$)
+
+# set(MPI_PATH "C:/Program Files (x86)/Microsoft SDKs/MPI")
+# set(PETSC_DE_PATH "E:/petsc/petsc-3.15.0/arch-mswin-c-debug")
+# set(PETSC_PATH "E:/petsc/petsc-3.15.0/include")
+
+# include_directories(${MPI_PATH}/Include/x64)
+# include_directories(${MPI_PATH}/Include)
+# include_directories(${PETSC_DE_PATH}/include)
+# include_directories(${PETSC_PATH})
+
+# include_directories(${PROJECT_SOURCE_DIR}$/Math)
+include_directories(${PROJECT_SOURCE_DIR}$)
+# link_directories(${MPI_PATH}/Lib/x64)
+# link_directories(${PETSC_DE_PATH}/lib)
+# link_libraries(msmpi.lib
+# msmpifec.lib
+# msmpifmc.lib
+# libpetsc.lib)
+
+add_executable(femsolver ${SOURCES})
+
+target_link_libraries(femsolver core)

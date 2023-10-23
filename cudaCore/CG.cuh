@@ -73,7 +73,7 @@ private:
         unsigned int result;
         asm volatile("ld.acquire.sys.global.u8 %0, [%1];"
                     : "=r"(result)
-                    : "=l"(arrived)
+                    : "l"(arrived)
                     : "memory");
         return result;
 #endif

@@ -2,8 +2,10 @@
 #include "../Common.hpp"
 #include "Vector.hpp"
 #include <assert.h>
-#include<vector>
-#include<map>
+#include <vector>
+#include <map>
+#include <set>
+#include <algorithm>
 
 template<typename T>
 using IdVal = std::pair<idxType,T>;

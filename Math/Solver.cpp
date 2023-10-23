@@ -28,7 +28,8 @@ void Solver::Solve(const SymetrixSparseMatrix& A,Vector& x,const Vector& b)
    // BiCGSTAB(A,x,b,tolerance,iteration_set,iteration_close,ResdualNorm);
     // CG_CG(A,x,b,tolerance,iteration_set,iteration_close,ResdualNorm);
     // CG_UM(A,x,b,tolerance,iteration_set,iteration_close,ResdualNorm);
-    CG_MBCG(A,x,b,tolerance,iteration_set,iteration_close,ResdualNorm);
+    // CG_MBCG(A,x,b,tolerance,iteration_set,iteration_close,ResdualNorm);
+    CG_MGCG(A,x,b,tolerance,iteration_set,iteration_close,ResdualNorm);
 }
 
 void Solver::setMaxIteration(idxType iter)

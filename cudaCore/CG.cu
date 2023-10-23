@@ -284,7 +284,8 @@ void CG_MGCG(const SymetrixSparseMatrix& A,Vector& x,const Vector& b,double tole
 
     if (distance(bestFit) < kNumGpusRequired) {
         printf("No two or more GPUs with same architecture capable of cooperative launch found.\n");
-        exit(EXIT_WAIVED);
+        // exit(EXIT_WAIVED);
+        exit(0);
     }
 
     std::set<int> bestFitDeviceIds;
@@ -417,7 +418,7 @@ void CG_MGCG(const SymetrixSparseMatrix& A,Vector& x,const Vector& b,double tole
     // set numSms & numBlocksPerSm to be lowest of 2 devices
     while (deviceId != bestFitDeviceIds.end()) {
         cudaDeviceProp deviceProp;
-        CUDACheck(cudaSetDevice(*deviceId))
+        CUDACheck(cudaSetDevice(*deviceId));
         CUDACheck(cudaGetDeviceProperties(&deviceProp, *deviceId));
         
         int numBlocksPerSmTemp = 0;
@@ -434,7 +435,8 @@ void CG_MGCG(const SymetrixSparseMatrix& A,Vector& x,const Vector& b,double tole
 
     if (!numBlocksPerSm) {
         printf("Max active blocks per SM is returned as 0. Hence, Waving the sample\n");
-        exit(EXIT_WAIVED);
+        // exit(EXIT_WAIVED);
+        exit(0);
     }
 
     int device_count = 0;
@@ -511,7 +513,7 @@ void CG_MGCG(const SymetrixSparseMatrix& A,Vector& x,const Vector& b,double tole
     }
     
     CUDACheck(cudaMemPrefetchAsync(x_vec, N * sizeof(double), cudaCpuDeviceId));
-    CUDACheck(cudaMemPrefetchAsync(dot_result, N * sizeof(double), cudaCpuDeviceId));
+    CUDACheck(cudaMemPrefetchAsync(dot_result, sizeof(double), cudaCpuDeviceId));
 
     deviceId = bestFitDeviceIds.begin();
     device_count = 0;

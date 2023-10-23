@@ -4,6 +4,7 @@
 //
 
 #include "IntegrationMatrix.hpp"
+#include <cmath>
 
 // not a petsc matrix !
 
