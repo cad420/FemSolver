@@ -230,6 +230,7 @@ extern "C" __global__ void CG_MGCG_kernel(int *row, int *col, double *val, doubl
         kk++;
     }
     *k = kk;
+    return;
 }
 
 std::multimap<std::pair<int, int>, int> getIdenticalGPUs()
@@ -347,7 +348,7 @@ void CG_MGCG(const SymetrixSparseMatrix& A,Vector& x,const Vector& b,double tole
             }    
         }
     }
-
+ 
     int *row, *col;
     CUDACheck(cudaMallocManaged(reinterpret_cast<void **>(&row), num_offsets * sizeof(int)));
     row[0] = 0;

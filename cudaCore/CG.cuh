@@ -84,7 +84,7 @@ private:
         *(volatile unsigned char *)arrived = val;
 #else
         unsigned int reg_val = val;
-        asm volatile("st.release.sys.global.u8 [%0], %1;"
+        asm volatile("st.release.sys.global.u8 [%1], %0;"
                     :
                     : "r"(reg_val) "l"(arrived) 
                     : "memory");
